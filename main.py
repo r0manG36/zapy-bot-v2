@@ -4,6 +4,7 @@ from flask import Flask
 import discord
 from discord.ext import commands
 from google import genai
+from google.genai import types
 
 # 1. Servidor Web Flask para Render (Keep-Alive 24/7)
 app = Flask(__name__)
@@ -27,7 +28,7 @@ def keep_alive():
 
 keep_alive()
 
-# 2. Configurar cliente de Gemini con la API Key principal
+# 2. Configurar cliente de Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -44,15 +45,21 @@ def obtener_o_crear_chat(thread_id):
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
-  # Modelo ultra rápido gemini-3.5-flash-lite
-  chat = client.chats.create(model="gemini-3.5-flash-lite")
+  # Activa la herramienta de búsqueda en tiempo real
+  configuracion = types.GenerateContentConfig(
+      tools=[types.Tool(google_search=types.GoogleSearch())]
+  )
+
+  chat = client.chats.create(
+      model="gemini-3.5-flash-lite", config=configuracion
+  )
   historiales_chat[thread_id] = chat
   return chat
 
 
 @bot.event
 async def on_ready():
-  print(f"Bot MVP listo y conectado como {bot.user}")
+  print(f"Bot listo con búsqueda web como {bot.user}")
 
 
 @bot.event
@@ -71,7 +78,6 @@ async def on_message(message):
         if not prompt:
           prompt = "Hola"
 
-        # Caso 1: Mención fuera de un hilo -> Crear hilo e iniciar conversación
         if fue_mencionado and not es_hilo:
           thread = await message.create_thread(
               name=f"Conversación con {message.author.name}"
@@ -80,7 +86,6 @@ async def on_message(message):
           response = chat_session.send_message(prompt)
           await thread.send(response.text)
 
-        # Caso 2: Mensaje dentro del hilo -> Responder manteniendo el contexto
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
           response = chat_session.send_message(prompt)
