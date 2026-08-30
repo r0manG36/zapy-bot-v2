@@ -34,7 +34,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -50,14 +49,8 @@ async def on_message(message):
   if message.author == bot.user:
     return
 
-  # Detectar si le hablan por mención o si están conversando dentro de un hilo creado por el bot
-  es_hilo_del_bot = (
-      isinstance(message.channel, discord.Thread)
-      and message.channel.owner == bot.user
-  )
-  fue_mencionado = bot.user.mentioned_in(message)
-
-  if fue_mencionado or es_hilo_del_bot:
+  # Responder únicamente cuando mencionen al bot en cualquier chat de texto
+  if bot.user.mentioned_in(message):
     async with message.channel.typing():
       try:
         # Limpiar la mención del texto para pasárselo limpio a Gemini
@@ -67,36 +60,27 @@ async def on_message(message):
         if not contenido_prompt:
           contenido_prompt = "Hola"
 
-        # Generar respuesta usando Gemini
+        # Generar respuesta usando el modelo Gemini 3.6 Flash
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=contenido_prompt,
         )
+
         texto_respuesta = response.text
 
-        # Si le hablan en un canal principal, crea una nueva publicación (hilo/foro)
-        if fue_mencionado and not isinstance(message.channel, discord.Thread):
-          try:
-            thread = await message.create_thread(
-                name=f"Publicación de {message.author.name}"
-            )
-            await thread.send(texto_respuesta)
-          except Exception:
-            await message.reply(texto_respuesta)
-        else:
-          # Si ya estamos dentro de la publicación, responde con normalidad
-          await message.reply(texto_respuesta)
+        # Responder directamente al mensaje en el chat
+        await message.reply(texto_respuesta)
 
       except Exception as e:
-        print(f"Error al generar respuesta con Gemini: {e}")
+        print(f"Error detallado de Gemini: {e}")
         await message.reply(
-            "Lo siento, ha ocurrido un error procesando tu consulta con Gemini."
+            f"Error al conectar con Gemini: `{str(e)[:100]}`"
         )
 
   await bot.process_commands(message)
 
 
-# Cargar el token de Discord desde las variables de entorno
+# Cargar el token de Discord
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 if TOKEN:
