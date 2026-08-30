@@ -31,11 +31,15 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Diccionario para mantener la memoria/historial en cada hilo
+# Memoria de historial de chat por cada hilo
 historiales_chat = {}
 
-# Lista de identificadores oficiales de modelos Gemini
-MODELOS_DISPONIBLES = ['gemini-2.5-flash', 'gemini-1.5-flash']
+# Lista ordenada de preferencia de modelos estándar compatibles
+MODELOS_PREFERIDOS = [
+    'gemini-2.5-flash',
+    'gemini-1.5-flash',
+    'gemini-2.0-flash',
+]
 
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
@@ -44,39 +48,63 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
+def obtener_modelo_valido():
+  """Prueba la lista de modelos preferidos para encontrar uno que funcione correctamente."""
+  for modelo in MODELOS_PREFERIDOS:
+    try:
+      # Probar si el modelo responde a una creación rápida de chat
+      client.chats.create(model=modelo)
+      return modelo
+    except Exception as e:
+      print(f'Modelo {modelo} no disponible: {e}')
+      continue
+  # Fallback a gemini-1.5-flash si no hay respuesta de la lista
+  return 'gemini-1.5-flash'
+
+
+# Detectar modelo activo al iniciar
+MODELO_ACTIVO = None
+
+
 def obtener_o_crear_chat(thread_id):
-  """Obtiene el chat existente o crea uno nuevo intentando con modelos válidos."""
+  """Obtiene el chat existente o crea uno nuevo con el modelo validado."""
+  global MODELO_ACTIVO
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
-  for modelo in MODELOS_DISPONIBLES:
-    try:
-      chat = client.chats.create(model=modelo)
-      historiales_chat[thread_id] = chat
-      return chat
-    except Exception as e:
-      print(f'Error al iniciar chat con modelo {modelo}: {e}')
-      continue
+  if not MODELO_ACTIVO:
+    MODELO_ACTIVO = obtener_modelo_valido()
 
-  raise Exception('No se pudo establecer conexión con ningún modelo de Gemini.')
+  chat = client.chats.create(model=MODELO_ACTIVO)
+  historiales_chat[thread_id] = chat
+  return chat
 
 
 def enviar_mensaje_con_fallback(thread_id, prompt):
-  """Envía el mensaje al chat activo y reinicia la sesión si expira o falla."""
-  chat_session = obtener_o_crear_chat(thread_id)
+  """Envía el mensaje al chat activo o reinicia si la sesión o modelo fallan."""
+  global MODELO_ACTIVO
   try:
+    chat_session = obtener_o_crear_chat(thread_id)
     return chat_session.send_message(prompt)
   except Exception as e:
-    print(f'Error en sesión activa, recreando chat: {e}')
+    print(f'Error en sesión activa, buscando modelo alternativo: {e}')
     if thread_id in historiales_chat:
       del historiales_chat[thread_id]
-    nuevo_chat = obtener_o_crear_chat(thread_id)
-    return nuevo_chat.send_message(prompt)
+
+    MODELO_ACTIVO = obtener_modelo_valido()
+    chat_session = client.chats.create(model=MODELO_ACTIVO)
+    historiales_chat[thread_id] = chat_session
+    return chat_session.send_message(prompt)
 
 
 @bot.event
 async def on_ready():
-  print(f'Bot conectado exitosamente como {bot.user}')
+  global MODELO_ACTIVO
+  MODELO_ACTIVO = obtener_modelo_valido()
+  print(
+      f'Bot conectado como {bot.user}. Usando modelo de Gemini:'
+      f' {MODELO_ACTIVO}'
+  )
 
 
 @bot.event
@@ -96,7 +124,7 @@ async def on_message(message):
         if not prompt:
           prompt = 'Hola'
 
-        # CASO 1: Mención en canal normal -> Crear hilo inicial
+        # CASO 1: Mención fuera del hilo -> Crea el hilo único inicial
         if fue_mencionado and not es_hilo:
           thread = await message.create_thread(
               name=f'Conversación con {message.author.name}'
@@ -104,7 +132,7 @@ async def on_message(message):
           response = enviar_mensaje_con_fallback(thread.id, prompt)
           await thread.send(response.text)
 
-        # CASO 2: Mensajes dentro del hilo existente -> Mantiene el contexto
+        # CASO 2: Mensaje dentro del hilo del bot -> Continúa la conversación con historial
         elif es_hilo_del_bot:
           response = enviar_mensaje_con_fallback(message.channel.id, prompt)
           await message.reply(response.text)
