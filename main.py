@@ -4,7 +4,7 @@ from flask import Flask
 import discord
 from discord.ext import commands
 
-# 1. Servidor Web Flask para engañar a Render y mantener el puerto abierto
+# 1. Servidor Web Flask para Render
 app = Flask(__name__)
 
 @app.route('/')
@@ -32,6 +32,21 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f'Bot conectado exitosamente como {bot.user}')
+
+@bot.event
+async def on_message(message):
+    # Evitar que el bot se responda a sí mismo
+    if message.author == bot.user:
+        return
+
+    # Verificar si el bot ha sido mencionado
+    if bot.user.mentioned_in(message):
+        async with message.channel.typing():
+            # Crea un hilo y responde cuando lo mencionan
+            thread = await message.create_thread(name=f"Consulta de {message.author.name}")
+            await thread.send(f"¡Hola {message.author.mention}! He recibido tu mensaje. ¿En qué te puedo ayudar?")
+
+    await bot.process_commands(message)
 
 # Cargar el token desde las variables de entorno de Render
 TOKEN = os.environ.get("DISCORD_TOKEN")
