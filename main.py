@@ -31,6 +31,9 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Diccionario para almacenar la memoria/historial de chat por cada hilo
+historiales_chat = {}
+
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
 intents.message_content = True
@@ -45,36 +48,56 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-  # Evitar que el bot se responda a sí mismo
   if message.author == bot.user:
     return
 
-  # Responder únicamente cuando mencionen al bot en cualquier chat de texto
-  if bot.user.mentioned_in(message):
+  es_hilo = isinstance(message.channel, discord.Thread)
+  es_hilo_del_bot = es_hilo and message.channel.owner == bot.user
+  fue_mencionado = bot.user.mentioned_in(message)
+
+  # Responder si lo mencionan fuera de un hilo O si están hablando dentro del hilo creado por el bot
+  if fue_mencionado or es_hilo_del_bot:
     async with message.channel.typing():
       try:
-        # Limpiar la mención del texto para pasárselo limpio a Gemini
-        contenido_prompt = message.content.replace(
-            f"<@{bot.user.id}>", ""
-        ).strip()
-        if not contenido_prompt:
-          contenido_prompt = "Hola"
+        # Limpiar la mención del mensaje
+        prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
+        if not prompt:
+          prompt = "Hola"
 
-        # Generar respuesta usando el modelo Gemini 3.6 Flash
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=contenido_prompt,
-        )
+        # CASO 1: Mención en un canal normal -> Se crea EL HILO ÚNICO
+        if fue_mencionado and not es_hilo:
+          thread = await message.create_thread(
+              name=f"Conversación con {message.author.name}"
+          )
 
-        texto_respuesta = response.text
+          # Iniciar sesión de chat con memoria para este nuevo hilo
+          chat_session = client.chats.create(model="gemini-3.6-flash")
+          historiales_chat[thread.id] = chat_session
 
-        # Responder directamente al mensaje en el chat
-        await message.reply(texto_respuesta)
+          # Enviar la primera respuesta con Gemini dentro del hilo recién creado
+          response = chat_session.send_message(prompt)
+          await thread.send(response.text)
+
+        # CASO 2: Mensaje enviado dentro del hilo existente -> Mantiene el contexto
+        elif es_hilo_del_bot:
+          thread_id = message.channel.id
+
+          # Si por alguna razón el hilo no está cargado en memoria, se crea una sesión nueva
+          if thread_id not in historiales_chat:
+            historiales_chat[thread_id] = client.chats.create(
+                model="gemini-3.6-flash"
+            )
+
+          chat_session = historiales_chat[thread_id]
+
+          # Responder manteniendo toda la memoria previa del hilo
+          response = chat_session.send_message(prompt)
+          await message.reply(response.text)
 
       except Exception as e:
-        print(f"Error detallado de Gemini: {e}")
+        print(f"Error en la interacción: {e}")
         await message.reply(
-            f"Error al conectar con Gemini: `{str(e)[:100]}`"
+            f"Error al procesar la solicitud: `{str(e)[:100]}`"
         )
 
   await bot.process_commands(message)
