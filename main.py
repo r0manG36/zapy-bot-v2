@@ -12,7 +12,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-  return "Bot activo 24/7"
+  return "Bot MVP Activo 24/7"
 
 
 def run_flask():
@@ -28,7 +28,7 @@ def keep_alive():
 
 keep_alive()
 
-# 2. Configurar cliente de Gemini
+# 2. Cliente de Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -45,9 +45,13 @@ def obtener_o_crear_chat(thread_id):
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
-  # Activa la herramienta de búsqueda en tiempo real
   configuracion = types.GenerateContentConfig(
-      tools=[types.Tool(google_search=types.GoogleSearch())]
+      system_instruction=(
+          "Eres un asistente personal de productividad amigable y eficiente."
+          " Tu objetivo principal es ayudar al usuario a organizar su día y"
+          " rutina diaria. Da respuestas estructuradas usando listas con"
+          " viñetas o bloques de hora claros. Sé breve, motivador y directo."
+      )
   )
 
   chat = client.chats.create(
@@ -57,13 +61,20 @@ def obtener_o_crear_chat(thread_id):
   return chat
 
 
+async def enviar_mensaje_largo(destino, texto):
+  limite = 1900
+  for i in range(0, len(texto), limite):
+    await destino.send(texto[i : i + limite])
+
+
 @bot.event
 async def on_ready():
-  print(f"Bot listo con búsqueda web como {bot.user}")
+  print(f"Bot MVP listo y conectado como {bot.user}")
 
 
 @bot.event
 async def on_message(message):
+  # Ignorar los mensajes propios del bot
   if message.author == bot.user:
     return
 
@@ -71,29 +82,42 @@ async def on_message(message):
   es_hilo_del_bot = es_hilo and message.channel.owner == bot.user
   fue_mencionado = bot.user.mentioned_in(message)
 
-  if fue_mencionado or es_hilo_del_bot:
+  # Responde si lo mencionan fuera de un hilo O si están escribiendo dentro de su hilo
+  if (fue_mencionado and not es_hilo) or es_hilo_del_bot:
     async with message.channel.typing():
       try:
         prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not prompt:
-          prompt = "Hola"
+          prompt = "Hola, ayúdame a organizar mi día."
 
+        # Caso 1: Mención en canal normal -> Crear hilo
         if fue_mencionado and not es_hilo:
           thread = await message.create_thread(
-              name=f"Conversación con {message.author.name}"
+              name=f"📅 Rutina de {message.author.name}"
           )
           chat_session = obtener_o_crear_chat(thread.id)
           response = chat_session.send_message(prompt)
-          await thread.send(response.text)
+          await enviar_mensaje_largo(thread, response.text)
 
+        # Caso 2: Escribir dentro del hilo (sin necesidad de mencionarlo)
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
           response = chat_session.send_message(prompt)
-          await message.reply(response.text)
+          await enviar_mensaje_largo(message.channel, response.text)
 
       except Exception as e:
-        print(f"Error en interacción: {e}")
-        await message.reply(f"Error al procesar la respuesta: `{str(e)[:100]}`")
+        error_str = str(e)
+        print(f"Error en interacción: {error_str}")
+
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+          await message.reply(
+              "⏳ **Límite temporal alcanzado:** He recibido muchas solicitudes"
+              " seguidas. Espera unos 30-60 segundos e inténtalo de nuevo."
+          )
+        else:
+          await message.reply(
+              f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
+          )
 
   await bot.process_commands(message)
 
