@@ -61,6 +61,25 @@ def obtener_o_crear_chat(thread_id):
   return chat
 
 
+def generar_titulo_hilo(prompt):
+  """Genera un título de 3 palabras máximo para el hilo."""
+  try:
+    respuesta = client.models.generate_content(
+        model="gemini-3.5-flash-lite",
+        contents=(
+            f"Resume el siguiente texto en 3 palabras como máximo para usarlo"
+            f" como título de un hilo de Discord. No uses comillas ni puntos:"
+            f" '{prompt}'"
+        ),
+    )
+    titulo = respuesta.text.strip().replace('"', "")
+    # Cortar a máximo 3 palabras por seguridad
+    palabras = titulo.split()[:3]
+    return " ".join(palabras) if palabras else "Nueva rutina"
+  except Exception:
+    return "Nueva rutina"
+
+
 async def enviar_mensaje_largo(destino, texto):
   limite = 1900
   for i in range(0, len(texto), limite):
@@ -74,7 +93,6 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-  # Ignorar los mensajes propios del bot
   if message.author == bot.user:
     return
 
@@ -82,7 +100,6 @@ async def on_message(message):
   es_hilo_del_bot = es_hilo and message.channel.owner == bot.user
   fue_mencionado = bot.user.mentioned_in(message)
 
-  # Responde si lo mencionan fuera de un hilo O si están escribiendo dentro de su hilo
   if (fue_mencionado and not es_hilo) or es_hilo_del_bot:
     async with message.channel.typing():
       try:
@@ -90,16 +107,16 @@ async def on_message(message):
         if not prompt:
           prompt = "Hola, ayúdame a organizar mi día."
 
-        # Caso 1: Mención en canal normal -> Crear hilo
+        # Caso 1: Mención fuera de un hilo -> Generar título corto y crear el hilo
         if fue_mencionado and not es_hilo:
-          thread = await message.create_thread(
-              name=f"📅 Rutina de {message.author.name}"
-          )
+          titulo_hilo = generar_titulo_hilo(prompt)
+          thread = await message.create_thread(name=titulo_hilo)
+
           chat_session = obtener_o_crear_chat(thread.id)
           response = chat_session.send_message(prompt)
           await enviar_mensaje_largo(thread, response.text)
 
-        # Caso 2: Escribir dentro del hilo (sin necesidad de mencionarlo)
+        # Caso 2: Escribir dentro del hilo existente
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
           response = chat_session.send_message(prompt)
