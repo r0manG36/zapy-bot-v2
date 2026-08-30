@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands
 from google import genai
 
-# 1. Servidor Web Flask para mantener activo el bot 24/7
+# 1. Servidor Web Flask para Render (Keep-Alive 24/7)
 app = Flask(__name__)
 
 
@@ -44,8 +44,8 @@ def obtener_o_crear_chat(thread_id):
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
-  # Usando el modelo oficial gemini-3.6-flash para respuestas rápidas
-  chat = client.chats.create(model="gemini-3.6-flash")
+  # Usando el modelo estable oficial gemini-2.0-flash
+  chat = client.chats.create(model="gemini-2.0-flash")
   historiales_chat[thread_id] = chat
   return chat
 
