@@ -27,15 +27,15 @@ def keep_alive():
 
 keep_alive()
 
-# 2. Configurar la API de Gemini
+# 2. Configurar el cliente de Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Diccionario para almacenar el historial de chat por cada hilo
+# Diccionario para mantener la memoria/historial en cada hilo
 historiales_chat = {}
 
-# Lista de modelos por orden de preferencia
-MODELOS_DISPONIBLES = ["gemini-2.5-flash", "gemini-1.5-flash"]
+# Lista de modelos oficiales válidos
+MODELOS_DISPONIBLES = ["gemini-1.5-flash", "gemini-1.5-pro"]
 
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
@@ -45,7 +45,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 def obtener_o_crear_chat(thread_id):
-  """Crea una sesión de chat intentando los modelos en orden si alguno da 503."""
+  """Obtiene el chat existente o crea uno nuevo usando un modelo válido."""
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
@@ -55,30 +55,24 @@ def obtener_o_crear_chat(thread_id):
       historiales_chat[thread_id] = chat
       return chat
     except Exception as e:
-      print(f"Modelo {modelo} no disponible: {e}")
+      print(f"No se pudo inicializar con {modelo}: {e}")
       continue
 
-  raise Exception("Ningún modelo de Gemini se encuentra disponible ahora mismo.")
+  raise Exception("No se pudo conectar con los modelos de Gemini.")
 
 
-def enviar_mensaje_con_fallback(chat_session, prompt):
-  """Envía el mensaje al chat activo; si falla por saturación, reintenta con el modelo secundario."""
+def enviar_mensaje_con_fallback(thread_id, prompt):
+  """Envía el mensaje al chat activo y gestiona reconexiones en caso de error de red."""
+  chat_session = obtener_o_crear_chat(thread_id)
   try:
     return chat_session.send_message(prompt)
   except Exception as e:
-    if "503" in str(e) or "UNAVAILABLE" in str(e):
-      print(
-          "El modelo actual está saturado (503). Intentando cambiar de"
-          " modelo..."
-      )
-      # Crear nuevo chat de respaldo con un modelo alternativo
-      for modelo in MODELOS_DISPONIBLES:
-        try:
-          nuevo_chat = client.chats.create(model=modelo)
-          return nuevo_chat.send_message(prompt)
-        except Exception:
-          continue
-    raise e
+    print(f"Error al enviar mensaje, reintentando con sesión nueva: {e}")
+    # Si falla la sesión activa, forzamos la creación de una nueva
+    if thread_id in historiales_chat:
+      del historiales_chat[thread_id]
+    nuevo_chat = obtener_o_crear_chat(thread_id)
+    return nuevo_chat.send_message(prompt)
 
 
 @bot.event
@@ -98,35 +92,34 @@ async def on_message(message):
   if fue_mencionado or es_hilo_del_bot:
     async with message.channel.typing():
       try:
+        # Limpiar la mención del texto del mensaje
         prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not prompt:
           prompt = "Hola"
 
-        # CASO 1: Mención fuera de un hilo -> Crear hilo e iniciar conversación
+        # CASO 1: Mención en canal normal -> Crear el hilo inicial
         if fue_mencionado and not es_hilo:
           thread = await message.create_thread(
               name=f"Conversación con {message.author.name}"
           )
-          chat_session = obtener_o_crear_chat(thread.id)
-          response = enviar_mensaje_con_fallback(chat_session, prompt)
+          response = enviar_mensaje_con_fallback(thread.id, prompt)
           await thread.send(response.text)
 
-        # CASO 2: Continuación de la conversación dentro del hilo
+        # CASO 2: Mensajes dentro del hilo existente -> Conservar la memoria
         elif es_hilo_del_bot:
-          chat_session = obtener_o_crear_chat(message.channel.id)
-          response = enviar_mensaje_con_fallback(chat_session, prompt)
+          response = enviar_mensaje_con_fallback(message.channel.id, prompt)
           await message.reply(response.text)
 
       except Exception as e:
         print(f"Error en la interacción: {e}")
         await message.reply(
-            f"El servicio está muy concurrido en este momento. Por favor,"
-            f" reintenta en unos segundos. `{str(e)[:80]}`"
+            f"Error al procesar la respuesta: `{str(e)[:100]}`"
         )
 
   await bot.process_commands(message)
 
 
+# Cargar el token de Discord
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 if TOKEN:
