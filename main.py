@@ -32,10 +32,9 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# EXCLUSIVAMENTE MODELOS 3.6 FLASH Y 3.5 FLASH LITE
-MODELOS_DISPONIBLES = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
+MODELO_UNICO = "gemini-3.5-flash-lite"
 
-# Memoria por hilo y memoria global de exámenes
+# Memoria por hilo y memoria global
 historiales_chat = {}
 memoria_global = {
     "examenes_y_entregas": [],
@@ -78,11 +77,8 @@ def construir_system_prompt():
   )
   return (
       f"{SYSTEM_PROMPT_BASE}\n\n"
-      "**EXÁMENES Y ENTREGAS REGISTRADOS EN MEMORIA GLOBAL (Acuérdate de"
-      " estos datos en cualquier hilo):**\n"
-      f"{ex_str}\n\n"
-      "Si el usuario te menciona un nuevo examen, entrega o fecha importante,"
-      " responde normalmente confirmando que lo has anotado."
+      "**EXÁMENES Y ENTREGAS REGISTRADOS EN MEMORIA GLOBAL:**\n"
+      f"{ex_str}\n"
   )
 
 
@@ -93,53 +89,9 @@ def obtener_o_crear_chat(thread_id):
   configuracion = types.GenerateContentConfig(
       system_instruction=construir_system_prompt()
   )
-
-  for modelo in MODELOS_DISPONIBLES:
-    try:
-      chat = client.chats.create(model=modelo, config=configuracion)
-      historiales_chat[thread_id] = chat
-      return chat
-    except Exception:
-      continue
-
-  # Si falla el principal, intenta forzar con 3.5 Flash Lite
-  chat = client.chats.create(
-      model=MODELOS_DISPONIBLES[0], config=configuracion
-  )
+  chat = client.chats.create(model=MODELO_UNICO, config=configuracion)
   historiales_chat[thread_id] = chat
   return chat
-
-
-def enviar_mensaje_con_respaldo(chat_session, prompt, thread_id):
-  for modelo in MODELOS_DISPONIBLES:
-    try:
-      return chat_session.send_message(prompt)
-    except Exception as e:
-      err_msg = str(e)
-      if (
-          "503" in err_msg
-          or "429" in err_msg
-          or "UNAVAILABLE" in err_msg
-          or "404" in err_msg
-      ):
-        print(f"Cambiando a modelo de respaldo: {modelo}...")
-        try:
-          configuracion = types.GenerateContentConfig(
-              system_instruction=construir_system_prompt()
-          )
-          nueva_sesion = client.chats.create(
-              model=modelo, config=configuracion
-          )
-          historiales_chat[thread_id] = nueva_sesion
-          return nueva_sesion.send_message(prompt)
-        except Exception:
-          continue
-      else:
-        raise e
-  raise Exception(
-      "Los modelos Gemini 3.6 Flash y 3.5 Flash Lite están experimentando"
-      " alta carga."
-  )
 
 
 def actualizar_memoria_extraer_examenes(texto_usuario):
@@ -158,35 +110,85 @@ def actualizar_memoria_extraer_examenes(texto_usuario):
 
 
 def generar_titulo_hilo(prompt):
-  for modelo in MODELOS_DISPONIBLES:
-    try:
-      respuesta = client.models.generate_content(
-          model=modelo,
-          contents=(
-              f"Resume el siguiente texto en 3 palabras como máximo para el"
-              f" título de un hilo de Discord. Sin comillas: '{prompt}'"
-          ),
-      )
-      titulo = respuesta.text.strip().replace('"', "")
-      palabras = titulo.split()[:3]
-      return " ".join(palabras) if palabras else "Plan del día"
-    except Exception:
-      continue
-  return "Plan del día"
+  try:
+    temp_chat = client.chats.create(model=MODELO_UNICO)
+    respuesta = temp_chat.send_message(
+        f"Resume el siguiente texto en 3 palabras como máximo para el título de"
+        f" un hilo de Discord. Sin comillas: '{prompt}'"
+    )
+    titulo = respuesta.text.strip().replace('"', "")
+    palabras = titulo.split()[:3]
+    return " ".join(palabras) if palabras else "Plan del día"
+  except Exception as e:
+    print(f"Error generando título: {e}")
+    return "Plan del día"
 
 
-async def enviar_mensaje_largo(destino, texto):
-  limite = 1900
-  for i in range(0, len(texto), limite):
-    await destino.send(texto[i : i + limite])
+# 4. COMANDO !resumen CON FORMATO EMBED
+@bot.command(name="resumen")
+async def cmd_resumen(ctx):
+  embed = discord.Embed(
+      title="📌 Resumen de Rutina y Memoria Global",
+      description="Vista rápida de tus bloques clave y tareas pendientes.",
+      color=discord.Color.blue(),
+  )
+
+  embed.add_field(
+      name="⏰ Bloques fijos (Lunes a Viernes)",
+      value=(
+          "• **Despertar:** 7:10 AM\n"
+          "• **Clases:** 8:15 - 14:15\n"
+          "• **Comida/Descanso:** 14:30 - 15:30\n"
+          "• **Buscar hermana:** 16:20 - 16:45"
+      ),
+      inline=False,
+  )
+
+  ex_str = (
+      "\n".join(f"• {e}" for e in memoria_global["examenes_y_entregas"])
+      if memoria_global["examenes_y_entregas"]
+      else "Sin exámenes o entregas registradas."
+  )
+  embed.add_field(
+      name="📝 Exámenes y Entregas Registradas", value=ex_str, inline=False
+  )
+
+  embed.set_footer(
+      text="Zapy Productivity • Mencióname para organizar tu jornada"
+  )
+  await ctx.send(embed=embed)
+
+
+# FUNCIÓN PARA ENVIAR RESPUESTAS DE ZAPY EN EMBED CON COLOR
+async def enviar_respuesta_embed(destino, titulo, texto):
+  # Selecciona color dinámico en función del contenido de la respuesta
+  texto_lower = texto.lower()
+  if "estudiar" in texto_lower or "tarea" in texto_lower or "deberes" in texto_lower:
+    color = discord.Color.blue()
+  elif "entreno" in texto_lower or "entrenamiento" in texto_lower:
+    color = discord.Color.orange()
+  elif "libre" in texto_lower or "descanso" in texto_lower or "cena" in texto_lower:
+    color = discord.Color.green()
+  else:
+    color = discord.Color.purple()
+
+  # Discord limita la descripción de un Embed a 4090 caracteres
+  if len(texto) <= 4000:
+    embed = discord.Embed(
+        title=f"⚡ {titulo}", description=texto, color=color
+    )
+    embed.set_footer(text="Zapy Productivity Bot")
+    await destino.send(embed=embed)
+  else:
+    # Si la respuesta supera el tamaño máximo de un Embed, se divide en partes
+    limite = 1900
+    for i in range(0, len(texto), limite):
+      await destino.send(texto[i : i + limite])
 
 
 @bot.event
 async def on_ready():
-  print(
-      f"Zapy activado operando exclusivamente con Gemini 3.6 Flash y 3.5 Flash"
-      f" Lite como {bot.user}"
-  )
+  print(f"Zapy activado con Embeds y comando !resumen como {bot.user}")
 
 
 @bot.event
@@ -212,33 +214,22 @@ async def on_message(message):
           thread = await message.create_thread(name=titulo_hilo)
 
           chat_session = obtener_o_crear_chat(thread.id)
-          response = enviar_mensaje_con_respaldo(
-              chat_session, prompt, thread.id
-          )
-          await enviar_mensaje_largo(thread, response.text)
+          response = chat_session.send_message(prompt)
+          await enviar_respuesta_embed(thread, titulo_hilo, response.text)
 
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
-          response = enviar_mensaje_con_respaldo(
-              chat_session, prompt, message.channel.id
+          response = chat_session.send_message(prompt)
+          await enviar_respuesta_embed(
+              message.channel, "Planificación", response.text
           )
-          await enviar_mensaje_largo(message.channel, response.text)
 
       except Exception as e:
         error_str = str(e)
-        if "503" in error_str or "UNAVAILABLE" in error_str:
-          await message.reply(
-              "⚙️ Alta demanda temporal en los servidores. Reintenta en unos"
-              " segundos."
-          )
-        elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-          await message.reply(
-              "⏳ **Límite alcanzado:** Espera unos 30 segundos."
-          )
-        else:
-          await message.reply(
-              f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
-          )
+        print(f"Error procesando mensaje: {error_str}")
+        await message.reply(
+            f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
+        )
 
   await bot.process_commands(message)
 
