@@ -1,8 +1,10 @@
 import asyncio
 from datetime import datetime, time
+import io
 import os
 from threading import Thread
 import zoneinfo
+
 from flask import Flask
 import discord
 from discord.ext import commands, tasks
@@ -35,7 +37,6 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# MODELO FIJO
 MODELO_UNICO = "gemini-3.5-flash-lite"
 CANAL_NOTIFICACIONES_ID = int(os.environ.get("CANAL_NOTIFICACIONES_ID", 0))
 
@@ -112,7 +113,12 @@ def actualizar_memoria_extraer_examenes(texto_usuario):
       historiales_chat.clear()
 
 
-def generar_titulo_hilo(prompt):
+def generar_titulo_hilo_optimizado(prompt):
+  palabras = prompt.strip().split()
+  # Si el mensaje es corto, creamos el título al instante sin llamar a Gemini (Ahorra ~1.5 segundos)
+  if len(palabras) <= 3 and prompt != "Organízame el día de hoy":
+    return prompt[:30]
+
   try:
     temp_chat = client.chats.create(model=MODELO_UNICO)
     respuesta = temp_chat.send_message(
@@ -120,14 +126,37 @@ def generar_titulo_hilo(prompt):
         f" un hilo de Discord. Sin comillas: '{prompt}'"
     )
     titulo = respuesta.text.strip().replace('"', "")
-    palabras = titulo.split()[:3]
-    return " ".join(palabras) if palabras else "Plan del día"
-  except Exception as e:
-    print(f"Error generando título: {e}")
+    palabras_res = titulo.split()[:3]
+    return " ".join(palabras_res) if palabras_res else "Plan del día"
+  except Exception:
     return "Plan del día"
 
 
-# 4. RECORDATORIO AUTOMÁTICO
+# COMANDOS DE GESTIÓN DE MEMORIA
+@bot.command(name="limpiar_examenes")
+async def cmd_limpiar_examenes(ctx):
+  memoria_global["examenes_y_entregas"].clear()
+  historiales_chat.clear()
+  await ctx.send("🧹 Se ha vaciado la lista de exámenes y entregas guardadas.")
+
+
+@bot.command(name="borrar_examen")
+async def cmd_borrar_examen(ctx, *, texto: str):
+  encontrados = [
+      e
+      for e in memoria_global["examenes_y_entregas"]
+      if texto.lower() in e.lower()
+  ]
+  if encontrados:
+    for e in encontrados:
+      memoria_global["examenes_y_entregas"].remove(e)
+    historiales_chat.clear()
+    await ctx.send(f"✅ Se ha eliminado: `{encontrados[0]}`")
+  else:
+    await ctx.send("❌ No se encontró ningún examen que coincida con ese texto.")
+
+
+# RECORDATORIO AUTOMÁTICO
 HORA_AVISO = time(hour=7, minute=30, tzinfo=zoneinfo.ZoneInfo("Europe/Madrid"))
 
 
@@ -176,7 +205,6 @@ async def recordatorio_diario():
       print(f"Error en recordatorio automático: {e}")
 
 
-# COMANDO !resumen
 @bot.command(name="resumen")
 async def cmd_resumen(ctx):
   embed = discord.Embed(
@@ -262,12 +290,12 @@ async def on_message(message):
 
   if (fue_mencionado and not es_hilo) or es_hilo_del_bot:
     async with message.channel.typing():
-      archivo_audio_local = None
       audio_uploaded = None
+      audio_bytes_io = None
       try:
         prompt_texto = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-        # Detección y subida de audios
+        # Procesamiento optimizado de archivos de audio directo a memoria
         if message.attachments:
           for attachment in message.attachments:
             extensiones_audio = [
@@ -282,12 +310,15 @@ async def on_message(message):
                 attachment.filename.lower().endswith(ext)
                 for ext in extensiones_audio
             ):
-              archivo_audio_local = f"temp_{message.id}_{attachment.filename}"
-              await attachment.save(archivo_audio_local)
-              audio_uploaded = client.files.upload(file=archivo_audio_local)
+              audio_bytes = await attachment.read()
+              audio_bytes_io = io.BytesIO(audio_bytes)
+              audio_bytes_io.name = attachment.filename
+
+              audio_uploaded = client.files.upload(
+                  file=audio_bytes_io, mime_type=attachment.content_type
+              )
               break
 
-        # Selección del prompt según presencia de audio
         if audio_uploaded:
           instruccion_audio = (
               prompt_texto
@@ -307,7 +338,7 @@ async def on_message(message):
           actualizar_memoria_extraer_examenes(prompt_texto)
 
         if fue_mencionado and not es_hilo:
-          titulo_hilo = generar_titulo_hilo(texto_para_titulo)
+          titulo_hilo = generar_titulo_hilo_optimizado(texto_para_titulo)
           thread = await message.create_thread(name=titulo_hilo)
 
           chat_session = obtener_o_crear_chat(thread.id)
@@ -328,11 +359,8 @@ async def on_message(message):
             f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
         )
       finally:
-        if archivo_audio_local and os.path.exists(archivo_audio_local):
-          try:
-            os.remove(archivo_audio_local)
-          except Exception as cleanup_err:
-            print(f"Error limpiando archivo local: {cleanup_err}")
+        if audio_bytes_io:
+          audio_bytes_io.close()
 
   await bot.process_commands(message)
 
