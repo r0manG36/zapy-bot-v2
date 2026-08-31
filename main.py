@@ -1,8 +1,6 @@
 import asyncio
 from datetime import datetime, time
 import os
-
-os.environ["LMDX_SYNTAX_ENABLED"] = "0"
 from threading import Thread
 import zoneinfo
 from flask import Flask
@@ -37,7 +35,8 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODELO_UNICO = "gemini-2.5-flash"
+# MODELO FIJO
+MODELO_UNICO = "gemini-3.5-flash-lite"
 CANAL_NOTIFICACIONES_ID = int(os.environ.get("CANAL_NOTIFICACIONES_ID", 0))
 
 historiales_chat = {}
@@ -212,7 +211,9 @@ async def cmd_resumen(ctx):
   await ctx.send(embed=embed)
 
 
-async def procesar_y_enviar_respuesta(chat_session, contenido_prompt, destino, titulo):
+async def procesar_y_enviar_respuesta(
+    chat_session, contenido_prompt, destino, titulo
+):
   response_stream = chat_session.send_message_stream(contenido_prompt)
   texto_acumulado = ""
 
@@ -245,7 +246,7 @@ async def procesar_y_enviar_respuesta(chat_session, contenido_prompt, destino, t
 
 @bot.event
 async def on_ready():
-  print(f"Zapy activado como {bot.user}")
+  print(f"Zapy activado con {MODELO_UNICO} como {bot.user}")
   if not recordatorio_diario.is_running():
     recordatorio_diario.start()
 
@@ -266,25 +267,42 @@ async def on_message(message):
       try:
         prompt_texto = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-        # Detección y procesamiento de archivos de audio
+        # Detección y subida de audios
         if message.attachments:
           for attachment in message.attachments:
-            extensiones_audio = [".ogg", ".mp3", ".wav", ".m4a", ".aac", ".flac"]
-            if any(attachment.filename.lower().endswith(ext) for ext in extensiones_audio):
+            extensiones_audio = [
+                ".ogg",
+                ".mp3",
+                ".wav",
+                ".m4a",
+                ".aac",
+                ".flac",
+            ]
+            if any(
+                attachment.filename.lower().endswith(ext)
+                for ext in extensiones_audio
+            ):
               archivo_audio_local = f"temp_{message.id}_{attachment.filename}"
               await attachment.save(archivo_audio_local)
-
-              # Subir el audio a Gemini API
               audio_uploaded = client.files.upload(file=archivo_audio_local)
               break
 
-        # Construcción de la entrada para Gemini
+        # Selección del prompt según presencia de audio
         if audio_uploaded:
-          instruccion_audio = prompt_texto if prompt_texto else "Escucha este audio atentamente, responde a lo que pido o hazme un resumen estructurado."
+          instruccion_audio = (
+              prompt_texto
+              if prompt_texto
+              else (
+                  "Escucha este audio atentamente, responde a lo que pido o"
+                  " hazme un resumen estructurado."
+              )
+          )
           contenido_prompt = [audio_uploaded, instruccion_audio]
           texto_para_titulo = prompt_texto or "Nota de voz recibida"
         else:
-          contenido_prompt = prompt_texto if prompt_texto else "Organízame el día de hoy"
+          contenido_prompt = (
+              prompt_texto if prompt_texto else "Organízame el día de hoy"
+          )
           texto_para_titulo = contenido_prompt
           actualizar_memoria_extraer_examenes(prompt_texto)
 
@@ -310,12 +328,11 @@ async def on_message(message):
             f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
         )
       finally:
-        # Limpieza de archivos temporales locales
         if archivo_audio_local and os.path.exists(archivo_audio_local):
           try:
             os.remove(archivo_audio_local)
           except Exception as cleanup_err:
-            print(f"Error al eliminar archivo temporal: {cleanup_err}")
+            print(f"Error limpiando archivo local: {cleanup_err}")
 
   await bot.process_commands(message)
 
