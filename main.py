@@ -32,12 +32,8 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# MODELOS SOLICITADOS (Redundancia en orden)
-MODELOS_DISPONIBLES = [
-    "gemini-3.1-pro",
-    "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
-]
+# EXCLUSIVAMENTE MODELOS 3.6 FLASH Y 3.5 FLASH LITE
+MODELOS_DISPONIBLES = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
 
 # Memoria por hilo y memoria global de exámenes
 historiales_chat = {}
@@ -106,6 +102,7 @@ def obtener_o_crear_chat(thread_id):
     except Exception:
       continue
 
+  # Si falla el principal, intenta forzar con 3.5 Flash Lite
   chat = client.chats.create(
       model=MODELOS_DISPONIBLES[0], config=configuracion
   )
@@ -114,14 +111,18 @@ def obtener_o_crear_chat(thread_id):
 
 
 def enviar_mensaje_con_respaldo(chat_session, prompt, thread_id):
-  """Envía el mensaje y rota entre gemini-3.1-pro, gemini-3.5-flash-lite y gemini-3.6-flash si hay errores 503 o 429."""
   for modelo in MODELOS_DISPONIBLES:
     try:
       return chat_session.send_message(prompt)
     except Exception as e:
       err_msg = str(e)
-      if "503" in err_msg or "429" in err_msg or "UNAVAILABLE" in err_msg:
-        print(f"Error en modelo actual. Reintentando con {modelo}...")
+      if (
+          "503" in err_msg
+          or "429" in err_msg
+          or "UNAVAILABLE" in err_msg
+          or "404" in err_msg
+      ):
+        print(f"Cambiando a modelo de respaldo: {modelo}...")
         try:
           configuracion = types.GenerateContentConfig(
               system_instruction=construir_system_prompt()
@@ -136,7 +137,8 @@ def enviar_mensaje_con_respaldo(chat_session, prompt, thread_id):
       else:
         raise e
   raise Exception(
-      "Todos los modelos configurados están experimentando alta demanda."
+      "Los modelos Gemini 3.6 Flash y 3.5 Flash Lite están experimentando"
+      " alta carga."
   )
 
 
@@ -182,8 +184,8 @@ async def enviar_mensaje_largo(destino, texto):
 @bot.event
 async def on_ready():
   print(
-      "Zapy activado con modelos (3.1 Pro, 3.5 Flash-Lite, 3.6 Flash) como"
-      f" {bot.user}"
+      f"Zapy activado operando exclusivamente con Gemini 3.6 Flash y 3.5 Flash"
+      f" Lite como {bot.user}"
   )
 
 
