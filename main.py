@@ -32,11 +32,15 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Memoria por hilo
-historiales_chat = {}
+# MODELOS SOLICITADOS (Redundancia en orden)
+MODELOS_DISPONIBLES = [
+    "gemini-3.1-pro",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+]
 
-# MEMORIA GLOBAL PERSISTENTE ENTRE HILOS
-# Aquí guardamos notas importantes como exámenes, fechas o tareas entregadas
+# Memoria por hilo y memoria global de exámenes
+historiales_chat = {}
 memoria_global = {
     "examenes_y_entregas": [],
 }
@@ -64,14 +68,13 @@ Eres Zapy, el asistente personal de productividad del usuario. Conoces su rutina
 - **Domingo:** Ocupado de 13:00 a 16:00. Resto disponible para planificar la semana o estudiar.
 
 **Tus Reglas de Organización:**
-1. Manten la prioridad absoluta de garantizar entre 8 y 9 horas de sueño (irse a la cama entre las 22:10 y 23:10 aprox).
+1. Mantén la prioridad absoluta de garantizar entre 8 y 9 horas de sueño (irse a la cama entre las 22:10 y 23:10 aprox).
 2. Cuando el usuario te pida organizar su día o meter tareas, encájalas ÚNICAMENTE en sus huecos libres según el día de la semana.
 3. Responde siempre de forma clara, motivadora, directa y estructurada con bloques de horas o viñetas.
 """
 
 
 def construir_system_prompt():
-  """Inyecta los exámenes guardados globalmente en el system prompt de Gemini."""
   ex_str = (
       "\n".join(f"- {e}" for e in memoria_global["examenes_y_entregas"])
       if memoria_global["examenes_y_entregas"]
@@ -95,37 +98,79 @@ def obtener_o_crear_chat(thread_id):
       system_instruction=construir_system_prompt()
   )
 
+  for modelo in MODELOS_DISPONIBLES:
+    try:
+      chat = client.chats.create(model=modelo, config=configuracion)
+      historiales_chat[thread_id] = chat
+      return chat
+    except Exception:
+      continue
+
   chat = client.chats.create(
-      model="gemini-3.5-flash-lite", config=configuracion
+      model=MODELOS_DISPONIBLES[0], config=configuracion
   )
   historiales_chat[thread_id] = chat
   return chat
 
 
+def enviar_mensaje_con_respaldo(chat_session, prompt, thread_id):
+  """Envía el mensaje y rota entre gemini-3.1-pro, gemini-3.5-flash-lite y gemini-3.6-flash si hay errores 503 o 429."""
+  for modelo in MODELOS_DISPONIBLES:
+    try:
+      return chat_session.send_message(prompt)
+    except Exception as e:
+      err_msg = str(e)
+      if "503" in err_msg or "429" in err_msg or "UNAVAILABLE" in err_msg:
+        print(f"Error en modelo actual. Reintentando con {modelo}...")
+        try:
+          configuracion = types.GenerateContentConfig(
+              system_instruction=construir_system_prompt()
+          )
+          nueva_sesion = client.chats.create(
+              model=modelo, config=configuracion
+          )
+          historiales_chat[thread_id] = nueva_sesion
+          return nueva_sesion.send_message(prompt)
+        except Exception:
+          continue
+      else:
+        raise e
+  raise Exception(
+      "Todos los modelos configurados están experimentando alta demanda."
+  )
+
+
 def actualizar_memoria_extraer_examenes(texto_usuario):
-  """Detecta si el mensaje contiene información sobre exámenes para guardarla en la memoria global."""
-  palabras_clave = ["examen", "examenes", "entrega", "prueba", "control", "tengo que entregar"]
+  palabras_clave = [
+      "examen",
+      "examenes",
+      "entrega",
+      "prueba",
+      "control",
+      "tengo que entregar",
+  ]
   if any(clave in texto_usuario.lower() for clave in palabras_clave):
     if texto_usuario not in memoria_global["examenes_y_entregas"]:
       memoria_global["examenes_y_entregas"].append(texto_usuario)
-      # Reiniciamos las sesiones de chat para que reciban la instrucción actualizada
       historiales_chat.clear()
 
 
 def generar_titulo_hilo(prompt):
-  try:
-    respuesta = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=(
-            f"Resume el siguiente texto en 3 palabras como máximo para el título"
-            f" de un hilo de Discord. Sin comillas: '{prompt}'"
-        ),
-    )
-    titulo = respuesta.text.strip().replace('"', "")
-    palabras = titulo.split()[:3]
-    return " ".join(palabras) if palabras else "Plan del día"
-  except Exception:
-    return "Plan del día"
+  for modelo in MODELOS_DISPONIBLES:
+    try:
+      respuesta = client.models.generate_content(
+          model=modelo,
+          contents=(
+              f"Resume el siguiente texto en 3 palabras como máximo para el"
+              f" título de un hilo de Discord. Sin comillas: '{prompt}'"
+          ),
+      )
+      titulo = respuesta.text.strip().replace('"', "")
+      palabras = titulo.split()[:3]
+      return " ".join(palabras) if palabras else "Plan del día"
+    except Exception:
+      continue
+  return "Plan del día"
 
 
 async def enviar_mensaje_largo(destino, texto):
@@ -136,7 +181,10 @@ async def enviar_mensaje_largo(destino, texto):
 
 @bot.event
 async def on_ready():
-  print(f"Zapy activado con memoria global entre hilos como {bot.user}")
+  print(
+      "Zapy activado con modelos (3.1 Pro, 3.5 Flash-Lite, 3.6 Flash) como"
+      f" {bot.user}"
+  )
 
 
 @bot.event
@@ -155,7 +203,6 @@ async def on_message(message):
         if not prompt:
           prompt = "Organízame el día de hoy"
 
-        # Registrar automáticamente si hay datos sobre exámenes en el mensaje
         actualizar_memoria_extraer_examenes(prompt)
 
         if fue_mencionado and not es_hilo:
@@ -163,20 +210,28 @@ async def on_message(message):
           thread = await message.create_thread(name=titulo_hilo)
 
           chat_session = obtener_o_crear_chat(thread.id)
-          response = chat_session.send_message(prompt)
+          response = enviar_mensaje_con_respaldo(
+              chat_session, prompt, thread.id
+          )
           await enviar_mensaje_largo(thread, response.text)
 
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
-          response = chat_session.send_message(prompt)
+          response = enviar_mensaje_con_respaldo(
+              chat_session, prompt, message.channel.id
+          )
           await enviar_mensaje_largo(message.channel, response.text)
 
       except Exception as e:
         error_str = str(e)
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+        if "503" in error_str or "UNAVAILABLE" in error_str:
           await message.reply(
-              "⏳ **Límite temporal:** Espera 30 segundos antes de enviar otro"
-              " mensaje."
+              "⚙️ Alta demanda temporal en los servidores. Reintenta en unos"
+              " segundos."
+          )
+        elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+          await message.reply(
+              "⏳ **Límite alcanzado:** Espera unos 30 segundos."
           )
         else:
           await message.reply(
