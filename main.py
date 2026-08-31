@@ -32,15 +32,21 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Memoria por hilo
 historiales_chat = {}
+
+# MEMORIA GLOBAL PERSISTENTE ENTRE HILOS
+# Aquí guardamos notas importantes como exámenes, fechas o tareas entregadas
+memoria_global = {
+    "examenes_y_entregas": [],
+}
 
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# SYSTEM PROMPT ACTUALIZADO CON EL NUEVO HORARIO DEL LUNES
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_BASE = """
 Eres Zapy, el asistente personal de productividad del usuario. Conoces su rutina exacta de memoria:
 
 - **Despertar diario:** 7:10 AM.
@@ -64,17 +70,46 @@ Eres Zapy, el asistente personal de productividad del usuario. Conoces su rutina
 """
 
 
+def construir_system_prompt():
+  """Inyecta los exámenes guardados globalmente en el system prompt de Gemini."""
+  ex_str = (
+      "\n".join(f"- {e}" for e in memoria_global["examenes_y_entregas"])
+      if memoria_global["examenes_y_entregas"]
+      else "Ninguno registrado aún."
+  )
+  return (
+      f"{SYSTEM_PROMPT_BASE}\n\n"
+      "**EXÁMENES Y ENTREGAS REGISTRADOS EN MEMORIA GLOBAL (Acuérdate de"
+      " estos datos en cualquier hilo):**\n"
+      f"{ex_str}\n\n"
+      "Si el usuario te menciona un nuevo examen, entrega o fecha importante,"
+      " responde normalmente confirmando que lo has anotado."
+  )
+
+
 def obtener_o_crear_chat(thread_id):
   if thread_id in historiales_chat:
     return historiales_chat[thread_id]
 
-  configuracion = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT)
+  configuracion = types.GenerateContentConfig(
+      system_instruction=construir_system_prompt()
+  )
 
   chat = client.chats.create(
       model="gemini-3.5-flash-lite", config=configuracion
   )
   historiales_chat[thread_id] = chat
   return chat
+
+
+def actualizar_memoria_extraer_examenes(texto_usuario):
+  """Detecta si el mensaje contiene información sobre exámenes para guardarla en la memoria global."""
+  palabras_clave = ["examen", "examenes", "entrega", "prueba", "control", "tengo que entregar"]
+  if any(clave in texto_usuario.lower() for clave in palabras_clave):
+    if texto_usuario not in memoria_global["examenes_y_entregas"]:
+      memoria_global["examenes_y_entregas"].append(texto_usuario)
+      # Reiniciamos las sesiones de chat para que reciban la instrucción actualizada
+      historiales_chat.clear()
 
 
 def generar_titulo_hilo(prompt):
@@ -101,7 +136,7 @@ async def enviar_mensaje_largo(destino, texto):
 
 @bot.event
 async def on_ready():
-  print(f"Zapy activado y personalizado como {bot.user}")
+  print(f"Zapy activado con memoria global entre hilos como {bot.user}")
 
 
 @bot.event
@@ -119,6 +154,9 @@ async def on_message(message):
         prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not prompt:
           prompt = "Organízame el día de hoy"
+
+        # Registrar automáticamente si hay datos sobre exámenes en el mensaje
+        actualizar_memoria_extraer_examenes(prompt)
 
         if fue_mencionado and not es_hilo:
           titulo_hilo = generar_titulo_hilo(prompt)
