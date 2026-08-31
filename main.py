@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, time
 import os
+
+os.environ["LMDX_SYNTAX_ENABLED"] = "0"
 from threading import Thread
 import zoneinfo
 from flask import Flask
@@ -35,7 +37,7 @@ keep_alive()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODELO_UNICO = "gemini-3.5-flash-lite"
+MODELO_UNICO = "gemini-2.5-flash"
 CANAL_NOTIFICACIONES_ID = int(os.environ.get("CANAL_NOTIFICACIONES_ID", 0))
 
 historiales_chat = {}
@@ -67,6 +69,7 @@ Eres Zapy, el asistente personal de productividad del usuario. Conoces su rutina
 1. Mantén la prioridad absoluta de garantizar entre 8 y 9 horas de sueño (irse a la cama entre las 22:10 y 23:10 aprox).
 2. Cuando el usuario te pida organizar su día o meter tareas, encájalas ÚNICAMENTE en sus huecos libres según el día de la semana.
 3. Responde siempre de forma clara, motivadora, directa y estructurada con bloques de horas o viñetas.
+4. Si el usuario te envía un audio o nota de voz, escucha con atención lo que pide, extrae la información relevante o tareas que mencione y responde en texto de forma organizada.
 """
 
 
@@ -150,7 +153,7 @@ async def recordatorio_diario():
 
       prompt_autogen = (
           f"Hoy es {dia_hoy}. Dame un resumen breve de buenos días con mi"
-          " estructura de horarios de hoy y recuérdame las entregas o examentes"
+          " estructura de horarios de hoy y recuérdame las entregas o exámenes"
           " pendientes."
       )
 
@@ -204,18 +207,20 @@ async def cmd_resumen(ctx):
   )
 
   embed.set_footer(
-      text="Zapy Productivity • Mencióname para organizar tu jornada"
+      text="Zapy Productivity • Mencióname o envíame una nota de voz"
   )
   await ctx.send(embed=embed)
 
 
-async def procesar_y_enviar_respuesta(chat_session, prompt, destino, titulo):
-  response_stream = chat_session.send_message_stream(prompt)
+async def procesar_y_enviar_respuesta(chat_session, contenido_prompt, destino, titulo):
+  response_stream = chat_session.send_message_stream(contenido_prompt)
   texto_acumulado = ""
 
   for chunk in response_stream:
     if chunk.text:
       texto_acumulado += chunk.text
+
+  actualizar_memoria_extraer_examenes(texto_acumulado)
 
   color = discord.Color.purple()
   texto_lower = texto_acumulado.lower()
@@ -256,26 +261,46 @@ async def on_message(message):
 
   if (fue_mencionado and not es_hilo) or es_hilo_del_bot:
     async with message.channel.typing():
+      archivo_audio_local = None
+      audio_uploaded = None
       try:
-        prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
-        if not prompt:
-          prompt = "Organízame el día de hoy"
+        prompt_texto = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-        actualizar_memoria_extraer_examenes(prompt)
+        # Detección y procesamiento de archivos de audio
+        if message.attachments:
+          for attachment in message.attachments:
+            extensiones_audio = [".ogg", ".mp3", ".wav", ".m4a", ".aac", ".flac"]
+            if any(attachment.filename.lower().endswith(ext) for ext in extensiones_audio):
+              archivo_audio_local = f"temp_{message.id}_{attachment.filename}"
+              await attachment.save(archivo_audio_local)
+
+              # Subir el audio a Gemini API
+              audio_uploaded = client.files.upload(file=archivo_audio_local)
+              break
+
+        # Construcción de la entrada para Gemini
+        if audio_uploaded:
+          instruccion_audio = prompt_texto if prompt_texto else "Escucha este audio atentamente, responde a lo que pido o hazme un resumen estructurado."
+          contenido_prompt = [audio_uploaded, instruccion_audio]
+          texto_para_titulo = prompt_texto or "Nota de voz recibida"
+        else:
+          contenido_prompt = prompt_texto if prompt_texto else "Organízame el día de hoy"
+          texto_para_titulo = contenido_prompt
+          actualizar_memoria_extraer_examenes(prompt_texto)
 
         if fue_mencionado and not es_hilo:
-          titulo_hilo = generar_titulo_hilo(prompt)
+          titulo_hilo = generar_titulo_hilo(texto_para_titulo)
           thread = await message.create_thread(name=titulo_hilo)
 
           chat_session = obtener_o_crear_chat(thread.id)
           await procesar_y_enviar_respuesta(
-              chat_session, prompt, thread, titulo_hilo
+              chat_session, contenido_prompt, thread, titulo_hilo
           )
 
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
           await procesar_y_enviar_respuesta(
-              chat_session, prompt, message.channel, "Planificación"
+              chat_session, contenido_prompt, message.channel, "Planificación"
           )
 
       except Exception as e:
@@ -284,6 +309,13 @@ async def on_message(message):
         await message.reply(
             f"⚠️ Ocurrió un error al responder: `{error_str[:100]}`"
         )
+      finally:
+        # Limpieza de archivos temporales locales
+        if archivo_audio_local and os.path.exists(archivo_audio_local):
+          try:
+            os.remove(archivo_audio_local)
+          except Exception as cleanup_err:
+            print(f"Error al eliminar archivo temporal: {cleanup_err}")
 
   await bot.process_commands(message)
 
