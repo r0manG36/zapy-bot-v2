@@ -1,8 +1,11 @@
+import asyncio
+from datetime import datetime, time
 import os
 from threading import Thread
+import zoneinfo
 from flask import Flask
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from google import genai
 from google.genai import types
 
@@ -33,12 +36,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODELO_UNICO = "gemini-3.5-flash-lite"
+CANAL_NOTIFICACIONES_ID = int(os.environ.get("CANAL_NOTIFICACIONES_ID", 0))
 
-# Memoria por hilo y memoria global
 historiales_chat = {}
-memoria_global = {
-    "examenes_y_entregas": [],
-}
+memoria_global = {"examenes_y_entregas": []}
 
 # 3. Configuración del Bot de Discord
 intents = discord.Intents.default()
@@ -87,7 +88,7 @@ def obtener_o_crear_chat(thread_id):
     return historiales_chat[thread_id]
 
   configuracion = types.GenerateContentConfig(
-      system_instruction=construir_system_prompt()
+      system_instruction=construir_system_prompt(), max_output_tokens=1000
   )
   chat = client.chats.create(model=MODELO_UNICO, config=configuracion)
   historiales_chat[thread_id] = chat
@@ -124,7 +125,56 @@ def generar_titulo_hilo(prompt):
     return "Plan del día"
 
 
-# 4. COMANDO !resumen CON FORMATO EMBED
+# 4. RECORDATORIO AUTOMÁTICO
+HORA_AVISO = time(hour=7, minute=30, tzinfo=zoneinfo.ZoneInfo("Europe/Madrid"))
+
+
+@tasks.loop(time=HORA_AVISO)
+async def recordatorio_diario():
+  if CANAL_NOTIFICACIONES_ID == 0:
+    return
+
+  canal = bot.get_channel(CANAL_NOTIFICACIONES_ID)
+  if canal:
+    try:
+      dias_semana = [
+          "Lunes",
+          "Martes",
+          "Miércoles",
+          "Jueves",
+          "Viernes",
+          "Sábado",
+          "Domingo",
+      ]
+      dia_hoy = dias_semana[datetime.now().weekday()]
+
+      prompt_autogen = (
+          f"Hoy es {dia_hoy}. Dame un resumen breve de buenos días con mi"
+          " estructura de horarios de hoy y recuérdame las entregas o examentes"
+          " pendientes."
+      )
+
+      configuracion = types.GenerateContentConfig(
+          system_instruction=construir_system_prompt(), max_output_tokens=600
+      )
+      chat_temp = client.chats.create(
+          model=MODELO_UNICO, config=configuracion
+      )
+      respuesta = chat_temp.send_message(prompt_autogen)
+
+      embed = discord.Embed(
+          title=f"☀️ Buenos días - Plan del {dia_hoy}",
+          description=respuesta.text,
+          color=discord.Color.gold(),
+      )
+      embed.set_footer(text="Zapy • Recordatorio Automático 7:30 AM")
+
+      await canal.send(embed=embed)
+    except Exception as e:
+      print(f"Error en recordatorio automático: {e}")
+
+
+# COMANDO !resumen
 @bot.command(name="resumen")
 async def cmd_resumen(ctx):
   embed = discord.Embed(
@@ -159,36 +209,40 @@ async def cmd_resumen(ctx):
   await ctx.send(embed=embed)
 
 
-# FUNCIÓN PARA ENVIAR RESPUESTAS DE ZAPY EN EMBED CON COLOR
-async def enviar_respuesta_embed(destino, titulo, texto):
-  # Selecciona color dinámico en función del contenido de la respuesta
-  texto_lower = texto.lower()
+async def procesar_y_enviar_respuesta(chat_session, prompt, destino, titulo):
+  response_stream = chat_session.send_message_stream(prompt)
+  texto_acumulado = ""
+
+  for chunk in response_stream:
+    if chunk.text:
+      texto_acumulado += chunk.text
+
+  color = discord.Color.purple()
+  texto_lower = texto_acumulado.lower()
   if "estudiar" in texto_lower or "tarea" in texto_lower or "deberes" in texto_lower:
     color = discord.Color.blue()
   elif "entreno" in texto_lower or "entrenamiento" in texto_lower:
     color = discord.Color.orange()
   elif "libre" in texto_lower or "descanso" in texto_lower or "cena" in texto_lower:
     color = discord.Color.green()
-  else:
-    color = discord.Color.purple()
 
-  # Discord limita la descripción de un Embed a 4090 caracteres
-  if len(texto) <= 4000:
+  if len(texto_acumulado) <= 4000:
     embed = discord.Embed(
-        title=f"⚡ {titulo}", description=texto, color=color
+        title=f"⚡ {titulo}", description=texto_acumulado, color=color
     )
     embed.set_footer(text="Zapy Productivity Bot")
     await destino.send(embed=embed)
   else:
-    # Si la respuesta supera el tamaño máximo de un Embed, se divide en partes
     limite = 1900
-    for i in range(0, len(texto), limite):
-      await destino.send(texto[i : i + limite])
+    for i in range(0, len(texto_acumulado), limite):
+      await destino.send(texto_acumulado[i : i + limite])
 
 
 @bot.event
 async def on_ready():
-  print(f"Zapy activado con Embeds y comando !resumen como {bot.user}")
+  print(f"Zapy activado como {bot.user}")
+  if not recordatorio_diario.is_running():
+    recordatorio_diario.start()
 
 
 @bot.event
@@ -214,14 +268,14 @@ async def on_message(message):
           thread = await message.create_thread(name=titulo_hilo)
 
           chat_session = obtener_o_crear_chat(thread.id)
-          response = chat_session.send_message(prompt)
-          await enviar_respuesta_embed(thread, titulo_hilo, response.text)
+          await procesar_y_enviar_respuesta(
+              chat_session, prompt, thread, titulo_hilo
+          )
 
         elif es_hilo_del_bot:
           chat_session = obtener_o_crear_chat(message.channel.id)
-          response = chat_session.send_message(prompt)
-          await enviar_respuesta_embed(
-              message.channel, "Planificación", response.text
+          await procesar_y_enviar_respuesta(
+              chat_session, prompt, message.channel, "Planificación"
           )
 
       except Exception as e:
