@@ -6,6 +6,10 @@ import discord
 from discord.ext import commands
 from google import genai
 from google.genai import types
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +24,48 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PETICIONES_FILE = "peticiones_informe.json"
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# --- GOOGLE CALENDAR HELPER ---
+def obtener_servicio_calendar():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists('credentials.json'):
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    return build('calendar', 'v3', credentials=creds)
+
+def obtener_eventos_proximos():
+    service = obtener_servicio_calendar()
+    if not service:
+        return "No se pudo conectar a Google Calendar (falta credentials.json o token.json)."
+    
+    ahora = datetime.datetime.utcnow().isoformat() + 'Z'
+    try:
+        eventos_result = service.events().list(
+            calendarId='primary', timeMin=ahora, maxResults=15, singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        eventos = eventos_result.get('items', [])
+        if not eventos:
+            return "No hay eventos próximos registrados en Google Calendar."
+        
+        resumen = []
+        for e in eventos:
+            inicio = e['start'].get('dateTime', e['start'].get('date'))
+            resumen.append(f"- {e.get('summary', 'Sin título')} ({inicio})")
+        return "\n".join(resumen)
+    except Exception as err:
+        return f"Error al consultar Google Calendar: {err}"
 
 SYSTEM_PROMPT = """
 Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Tu objetivo es optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
@@ -40,8 +86,8 @@ HORARIOS Y BLOQUEOS FIJOS DEL ESTUDIANTE:
 - Prioridad general: Garantizar entre 8 y 9 horas de sueño.
 
 INSTRUCCIONES DE ACTUACIÓN:
-1. Si el usuario te pide planificar una semana o no te ha dado los detalles de sus exámenes/deberes pendientes, HAZLE PREGUNTAS CONCISAS PRIMERO.
-2. Una vez dada la información, GENERA LA RUTINA EXACTA (hora de inicio y fin, asignatura, método concreto y tarea). Sé directo, sintético y estructurado para responder con máxima rapidez.
+1. Ten en cuenta tanto tus bloques fijos como los eventos leídos de Google Calendar.
+2. Si el usuario pide planificar o responde a preguntas sobre entregas/exámenes, GENERA LA RUTINA EXACTA indicando: hora de inicio y fin, asignatura, método concreto (explicado brevemente) y tarea a realizar. Sé conciso y estructurado.
 """
 
 def cargar_peticiones():
@@ -101,7 +147,7 @@ async def generar_embed_informe():
 
 @bot.event
 async def on_ready():
-    print(f"Zapy optimizado y listo como {bot.user}")
+    print(f"Zapy con Google Calendar listo como {bot.user}")
 
 @bot.event
 async def on_message(message):
@@ -124,6 +170,9 @@ async def on_message(message):
                         destino = message.channel
 
                     async with destino.typing():
+                        eventos_cal = obtener_eventos_proximos()
+                        prompt_completo = f"EVENTOS ACTUALES EN GOOGLE CALENDAR:\n{eventos_cal}\n\nPETICIÓN DEL ALUMNO:\n{texto_limpio}"
+
                         config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             temperature=0.3,
@@ -132,7 +181,7 @@ async def on_message(message):
 
                         response = client_gemini.models.generate_content(
                             model="gemini-3.5-flash-lite",
-                            contents=texto_limpio,
+                            contents=prompt_completo,
                             config=config
                         )
                         await enviar_mensaje_largo(destino, response.text)
@@ -143,7 +192,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# --- COMANDOS DEL BOT ---
+# --- COMANDOS ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
     embed = discord.Embed(title="🤖 Panel de Comandos de Zapy", color=discord.Color.blue())
@@ -151,15 +200,15 @@ async def mostrar_comandos(ctx):
     embed.add_field(name="🧹 Limpieza", value="`!clear [cantidad]` - Borra mensajes del canal o hilo.", inline=False)
     embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
+    embed.add_field(name="📅 Calendario", value="`!eventos` - Muestra los próximos eventos de Google Calendar.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="clear")
 async def limpiar_mensajes(ctx, cantidad: int = None):
-    """Borra mensajes del canal o hilo. Si no pones cantidad, limpia hasta 100 mensajes."""
     limite = cantidad if cantidad is not None else 100
     try:
         deleted = await ctx.channel.purge(limit=limite)
-        msg = await ctx.send(f"🧹 Se han borrado {len(deleted)} mensajes.", delete_after=3)
+        await ctx.send(f"🧹 Se han borrado {len(deleted)} mensajes.", delete_after=3)
     except Exception as e:
         await ctx.send(f"❌ Error al borrar mensajes: {e}", delete_after=5)
 
@@ -174,5 +223,10 @@ async def agregar_peticion(ctx, *, texto: str):
     peticiones.append(texto)
     guardar_peticiones(peticiones)
     await ctx.send(f"✅ Petición guardada: *{texto}*")
+
+@bot.command(name="eventos")
+async def ver_eventos(ctx):
+    evs = obtener_eventos_proximos()
+    await ctx.send(f"📅 **Próximos eventos en tu Google Calendar:**\n{evs}")
 
 bot.run(TOKEN)
