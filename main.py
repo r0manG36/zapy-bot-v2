@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from google import genai
 from dotenv import load_dotenv
 
-# Carga de variables de entorno desde el archivo .env
+# Carga de variables de entorno
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -118,19 +118,27 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Si no es un comando (!), responder con Gemini al mencionarle o por DM
+    # Responder con Gemini si lo mencionan o si es DM
     if not message.content.startswith("!"):
         if bot.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
             if client_gemini:
                 try:
                     texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
-                    async with message.channel.typing():
+                    
+                    # Si es un canal de texto (no un DM) y no estamos ya dentro de un hilo, crea uno
+                    if hasattr(message, "create_thread") and not isinstance(message.channel, discord.Thread):
+                        hilo = await message.create_thread(name=f"Consulta - {message.author.display_name}")
+                        destino = hilo
+                    else:
+                        destino = message.channel
+
+                    async with destino.typing():
                         prompt = f"Eres Zapy, un asistente de organización personal. Responde de forma concisa y útil a: {texto_limpio}"
                         response = client_gemini.models.generate_content(
                             model="gemini-3.5-flash-lite",
                             contents=prompt
                         )
-                        await message.channel.send(response.text)
+                        await destino.send(response.text)
                 except Exception as e:
                     await message.channel.send(f"❌ Error al procesar la solicitud: {e}")
             else:
