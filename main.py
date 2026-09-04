@@ -7,10 +7,9 @@ from discord.ext import commands, tasks
 from google import genai
 from dotenv import load_dotenv
 
-# Carga explícita de variables de entorno desde el archivo .env
+# Carga de variables de entorno desde el archivo .env
 load_dotenv()
 
-# --- CONFIGURACIÓN E INICIALIZACIÓN ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 CANAL_ID = int(os.getenv("CANAL_NOTIFICACIONES_ID", "0"))
@@ -104,7 +103,7 @@ async def generar_embed_informe():
 
     return embed
 
-# --- EVENTOS Y COMANDOS ---
+# --- EVENTOS Y ESCUCHA DE MENSAJES ---
 @bot.event
 async def on_ready():
     print(f"Zapy activo como {bot.user}")
@@ -114,6 +113,33 @@ async def on_ready():
     except Exception as e:
         print(f"Error al sincronizar comandos: {e}")
 
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # Si no es un comando (!), responder con Gemini al mencionarle o por DM
+    if not message.content.startswith("!"):
+        if bot.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
+            if client_gemini:
+                try:
+                    texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
+                    async with message.channel.typing():
+                        prompt = f"Eres Zapy, un asistente de organización personal. Responde de forma concisa y útil a: {texto_limpio}"
+                        response = client_gemini.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=prompt
+                        )
+                        await message.channel.send(response.text)
+                except Exception as e:
+                    await message.channel.send(f"❌ Error al procesar la solicitud: {e}")
+            else:
+                await message.channel.send("⚠️ La API de Gemini no está configurada correctamente.")
+
+    # Procesar comandos con prefijo !
+    await bot.process_commands(message)
+
+# --- COMANDOS DEL BOT ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
     embed = discord.Embed(
@@ -122,7 +148,7 @@ async def mostrar_comandos(ctx):
         color=discord.Color.blue()
     )
     embed.add_field(name="📌 General", value="`!comandos` - Muestra esta ayuda.", inline=False)
-    embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera e envía el resumen diario.", inline=False)
+    embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
     await ctx.send(embed=embed)
 
