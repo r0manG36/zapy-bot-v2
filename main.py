@@ -106,7 +106,7 @@ async def generar_embed_informe():
 # --- EVENTOS Y ESCUCHA DE MENSAJES ---
 @bot.event
 async def on_ready():
-    print(f"Zapy activo como {bot.user}")
+    print(f"Zapy activado con gemini-3.5-flash-lite como {bot.user}")
     try:
         synced = await bot.tree.sync()
         print(f"Sincronizados {len(synced)} comandos.")
@@ -127,7 +127,7 @@ async def on_message(message):
                     async with message.channel.typing():
                         prompt = f"Eres Zapy, un asistente de organización personal. Responde de forma concisa y útil a: {texto_limpio}"
                         response = client_gemini.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.5-flash-lite",
                             contents=prompt
                         )
                         await message.channel.send(response.text)
