@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from google import genai
 from dotenv import load_dotenv
 
-# Carga de variables de entorno
+# Carga de variables de entorno desde el archivo .env
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -23,6 +23,31 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PETICIONES_FILE = "peticiones_informe.json"
+
+# SYSTEM PROMPT CON TU CONTEXTO COMPLETO Y RUTINA BASE
+SYSTEM_PROMPT = """
+Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia y opiniones de expertos (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Eres un experto en la organización de bloques de estudio y rutinas para optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
+
+CONTEXTO DEL ESTUDIANTE:
+- Nivel: 4º de la ESO (Vía Científica).
+- Asignaturas: Euskera, Lengua Castellana, Inglés, Geografía e Historia, Educación Física, Tutoría, Matemáticas académicas, Física y Química, Tecnología, Digitalización y Robótica.
+- Idiomas: Todas las asignaturas son en Euskera, excepto Inglés y Lengua Castellana.
+
+HORARIOS Y BLOQUEOS FIJOS DEL ESTUDIANTE:
+- Lunes: Despertar 7:10. Clases 8:15-14:15. Comida/Descanso 14:30-15:30. Buscar hermana 16:20-16:45. Entrenamiento 17:30-20:30. Cena/Vuelta 20:30-21:30.
+- Martes: Despertar 7:10. Clases 8:15-14:15. Comida/Descanso 14:30-15:30. Buscar hermana 16:20-16:45. Familia/Cena 20:00-21:30.
+- Miércoles: Despertar 7:10. Clases 8:15-14:15. Comida/Descanso 14:30-15:30. Buscar hermana 16:20-16:45. Entrenamiento 17:30-20:30. Cena/Vuelta 20:30-21:30.
+- Jueves: Despertar 7:10. Clases 8:15-14:15. Comida/Descanso 14:30-15:30. Buscar hermana 16:20-16:45. Entrenamiento 19:30-21:45. Cena/Vuelta 22:00-22:30.
+- Viernes: Despertar 7:10. Clases 8:15-14:15. Comida/Descanso 14:30-15:30. Buscar hermana 16:20-16:45. Tardes de viernes NO se estudia.
+- Sábado: Partido a la mañana/mediodía (ocupado hasta las 16:00).
+- Domingo: Ocupado entre 13:00 y 16:00.
+- Prioridad general: Garantizar entre 8 y 9 horas de sueño.
+
+INSTRUCCIONES DE ACTUACIÓN:
+1. Si el usuario te pide planificar una semana/periodo o no te ha dado los detalles de sus exámenes/deberes pendientes, HAZLE PREGUNTAS PRIMERO para conocer sus necesidades puntuales (exámenes, entregas de proyectos, deberes, preferencia de horas).
+2. Una vez que el usuario te responda con sus entregas y exámenes, GENERA LA RUTINA EXACTA indicando: hora de inicio y fin, asignatura, método de estudio específico (explicado brevemente) y qué tarea concreta realizar.
+   Ejemplo: "A las 15:30 tienes que estudiar Matemáticas con Active Recall (resolución de 3 problemas sin mirar soluciones) hasta las 16:15".
+"""
 
 # --- FUNCIONES AUXILIARES ---
 def cargar_peticiones():
@@ -125,15 +150,14 @@ async def on_message(message):
                 try:
                     texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
                     
-                    # Si es un canal de texto (no un DM) y no estamos ya dentro de un hilo, crea uno
                     if hasattr(message, "create_thread") and not isinstance(message.channel, discord.Thread):
-                        hilo = await message.create_thread(name=f"Consulta - {message.author.display_name}")
+                        hilo = await message.create_thread(name=f"Planificación - {message.author.display_name}")
                         destino = hilo
                     else:
                         destino = message.channel
 
                     async with destino.typing():
-                        prompt = f"Eres Zapy, un asistente de organización personal. Responde de forma concisa y útil a: {texto_limpio}"
+                        prompt = f"{SYSTEM_PROMPT}\n\nConsulta/Mensaje del alumno: {texto_limpio}"
                         response = client_gemini.models.generate_content(
                             model="gemini-3.5-flash-lite",
                             contents=prompt
