@@ -113,20 +113,17 @@ async def on_message(message):
         es_mencion = bot.user.mentioned_in(message)
         es_dm = isinstance(message.channel, discord.DMChannel)
 
-        # Responder automáticamente en HILOS, MENCIONES o DMs
         if es_hilo or es_mencion or es_dm:
             if client_gemini:
                 try:
                     texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
                     
-                    # Si están mencionándole en un canal normal, abre un hilo nuevo
                     if not es_hilo and not es_dm and hasattr(message, "create_thread"):
                         destino = await message.create_thread(name=f"Planificación - {message.author.display_name}")
                     else:
                         destino = message.channel
 
                     async with destino.typing():
-                        # Configuración optimizada de respuesta veloz
                         config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             temperature=0.3,
@@ -146,13 +143,25 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+# --- COMANDOS DEL BOT ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
     embed = discord.Embed(title="🤖 Panel de Comandos de Zapy", color=discord.Color.blue())
     embed.add_field(name="📌 General", value="`!comandos` - Muestra esta ayuda.", inline=False)
+    embed.add_field(name="🧹 Limpieza", value="`!clear [cantidad]` - Borra mensajes del canal o hilo.", inline=False)
     embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
     await ctx.send(embed=embed)
+
+@bot.command(name="clear")
+async def limpiar_mensajes(ctx, cantidad: int = None):
+    """Borra mensajes del canal o hilo. Si no pones cantidad, limpia hasta 100 mensajes."""
+    limite = cantidad if cantidad is not None else 100
+    try:
+        deleted = await ctx.channel.purge(limit=limite)
+        msg = await ctx.send(f"🧹 Se han borrado {len(deleted)} mensajes.", delete_after=3)
+    except Exception as e:
+        await ctx.send(f"❌ Error al borrar mensajes: {e}", delete_after=5)
 
 @bot.command(name="informe")
 async def enviar_informe(ctx):
