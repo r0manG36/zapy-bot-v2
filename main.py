@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from google import genai
 from dotenv import load_dotenv
 
-# Carga de variables de entorno desde el archivo .env
+# Carga de variables de entorno
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -63,6 +63,12 @@ def guardar_peticiones(peticiones):
 def limpiar_peticiones():
     if os.path.exists(PETICIONES_FILE):
         os.remove(PETICIONES_FILE)
+
+async def enviar_mensaje_largo(destino, texto):
+    """Divide un mensaje largo en partes de menos de 2000 caracteres para evitar el error de Discord."""
+    limite = 1900
+    for i in range(0, len(texto), limite):
+        await destino.send(texto[i:i + limite])
 
 async def obtener_tiempo():
     url = "https://wttr.in/Vitoria-Gasteiz?format=%C+%t+(Min/Max:+%f)+Lluvia:+%p&M"
@@ -162,7 +168,7 @@ async def on_message(message):
                             model="gemini-3.5-flash-lite",
                             contents=prompt
                         )
-                        await destino.send(response.text)
+                        await enviar_mensaje_largo(destino, response.text)
                 except Exception as e:
                     await message.channel.send(f"❌ Error al procesar la solicitud: {e}")
             else:
