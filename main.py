@@ -3,30 +3,26 @@ import json
 import datetime
 import aiohttp
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
-# Carga de variables de entorno
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-CANAL_ID = int(os.getenv("CANAL_NOTIFICACIONES_ID", "0"))
 
-# Inicialización de la API de Gemini
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
-# Configuración de Intents y Bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PETICIONES_FILE = "peticiones_informe.json"
 
-# SYSTEM PROMPT CON TU CONTEXTO COMPLETO Y RUTINA BASE
 SYSTEM_PROMPT = """
-Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia y opiniones de expertos (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Eres un experto en la organización de bloques de estudio y rutinas para optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
+Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Tu objetivo es optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
 
 CONTEXTO DEL ESTUDIANTE:
 - Nivel: 4º de la ESO (Vía Científica).
@@ -44,12 +40,10 @@ HORARIOS Y BLOQUEOS FIJOS DEL ESTUDIANTE:
 - Prioridad general: Garantizar entre 8 y 9 horas de sueño.
 
 INSTRUCCIONES DE ACTUACIÓN:
-1. Si el usuario te pide planificar una semana/periodo o no te ha dado los detalles de sus exámenes/deberes pendientes, HAZLE PREGUNTAS PRIMERO para conocer sus necesidades puntuales (exámenes, entregas de proyectos, deberes, preferencia de horas).
-2. Una vez que el usuario te responda con sus entregas y exámenes, GENERA LA RUTINA EXACTA indicando: hora de inicio y fin, asignatura, método de estudio específico (explicado brevemente) y qué tarea concreta realizar.
-   Ejemplo: "A las 15:30 tienes que estudiar Matemáticas con Active Recall (resolución de 3 problemas sin mirar soluciones) hasta las 16:15".
+1. Si el usuario te pide planificar una semana o no te ha dado los detalles de sus exámenes/deberes pendientes, HAZLE PREGUNTAS CONCISAS PRIMERO.
+2. Una vez dada la información, GENERA LA RUTINA EXACTA (hora de inicio y fin, asignatura, método concreto y tarea). Sé directo, sintético y estructurado para responder con máxima rapidez.
 """
 
-# --- FUNCIONES AUXILIARES ---
 def cargar_peticiones():
     if os.path.exists(PETICIONES_FILE):
         with open(PETICIONES_FILE, "r", encoding="utf-8") as f:
@@ -65,7 +59,6 @@ def limpiar_peticiones():
         os.remove(PETICIONES_FILE)
 
 async def enviar_mensaje_largo(destino, texto):
-    """Divide un mensaje largo en partes de menos de 2000 caracteres para evitar el error de Discord."""
     limite = 1900
     for i in range(0, len(texto), limite):
         await destino.send(texto[i:i + limite])
@@ -92,81 +85,58 @@ async def generar_embed_informe():
         description=f"Informe correspondiente al {ahora.strftime('%d/%m/%Y - %H:%M')}:",
         color=discord.Color.gold()
     )
-
-    embed.add_field(
-        name="🌤️ Tiempo en Vitoria-Gasteiz",
-        value=f"`{tiempo_info}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📅 Planificador y Lectura",
-        value="• Revisa tus entregas y exámenes pendientes.\n• Recordatorio: Avanza con la lectura diaria programada.",
-        inline=False
-    )
-
-    embed.add_field(
-        name="⚽ Información Deportiva",
-        value="• Consulta los marcadores recientes y próximos partidos de tu jornada.",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📰 Noticias destacadas",
-        value="• Novedades de Inteligencia Artificial y Videojuegos en [3DJuegos](https://www.3djuegos.com) o [Xataka](https://www.xataka.com).",
-        inline=False
-    )
+    embed.add_field(name="🌤️ Tiempo en Vitoria-Gasteiz", value=f"`{tiempo_info}`", inline=False)
+    embed.add_field(name="📅 Planificador y Lectura", value="• Revisa tus entregas y exámenes pendientes.\n• Recordatorio: Avanza con la lectura diaria programada.", inline=False)
+    embed.add_field(name="⚽ Información Deportiva", value="• Consulta los marcadores recientes y próximos partidos de tu jornada.", inline=False)
+    embed.add_field(name="📰 Noticias destacadas", value="• Novedades de Inteligencia Artificial y Videojuegos en [3DJuegos](https://www.3djuegos.com) o [Xataka](https://www.xataka.com).", inline=False)
 
     if peticiones_vars:
         texto_vars = "\n".join([f"• {p}" for p in peticiones_vars])
-        embed.add_field(
-            name="📌 Peticiones y Notas Guardadas",
-            value=texto_vars,
-            inline=False
-        )
+        embed.add_field(name="📌 Peticiones y Notas Guardadas", value=texto_vars, inline=False)
         limpiar_peticiones()
     else:
-        embed.add_field(
-            name="📌 Peticiones Guardadas",
-            value="*Sin peticiones variables para hoy.*",
-            inline=False
-        )
+        embed.add_field(name="📌 Peticiones Guardadas", value="*Sin peticiones variables para hoy.*", inline=False)
 
     return embed
 
-# --- EVENTOS Y ESCUCHA DE MENSAJES ---
 @bot.event
 async def on_ready():
-    print(f"Zapy activado con gemini-3.5-flash-lite como {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Sincronizados {len(synced)} comandos.")
-    except Exception as e:
-        print(f"Error al sincronizar comandos: {e}")
+    print(f"Zapy optimizado y listo como {bot.user}")
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # Responder con Gemini si lo mencionan o si es DM
     if not message.content.startswith("!"):
-        if bot.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
+        es_hilo = isinstance(message.channel, discord.Thread)
+        es_mencion = bot.user.mentioned_in(message)
+        es_dm = isinstance(message.channel, discord.DMChannel)
+
+        # Responder automáticamente en HILOS, MENCIONES o DMs
+        if es_hilo or es_mencion or es_dm:
             if client_gemini:
                 try:
                     texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
                     
-                    if hasattr(message, "create_thread") and not isinstance(message.channel, discord.Thread):
-                        hilo = await message.create_thread(name=f"Planificación - {message.author.display_name}")
-                        destino = hilo
+                    # Si están mencionándole en un canal normal, abre un hilo nuevo
+                    if not es_hilo and not es_dm and hasattr(message, "create_thread"):
+                        destino = await message.create_thread(name=f"Planificación - {message.author.display_name}")
                     else:
                         destino = message.channel
 
                     async with destino.typing():
-                        prompt = f"{SYSTEM_PROMPT}\n\nConsulta/Mensaje del alumno: {texto_limpio}"
+                        # Configuración optimizada de respuesta veloz
+                        config = types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT,
+                            temperature=0.3,
+                            max_output_tokens=1200
+                        )
+
                         response = client_gemini.models.generate_content(
                             model="gemini-3.5-flash-lite",
-                            contents=prompt
+                            contents=texto_limpio,
+                            config=config
                         )
                         await enviar_mensaje_largo(destino, response.text)
                 except Exception as e:
@@ -174,17 +144,11 @@ async def on_message(message):
             else:
                 await message.channel.send("⚠️ La API de Gemini no está configurada correctamente.")
 
-    # Procesar comandos con prefijo !
     await bot.process_commands(message)
 
-# --- COMANDOS DEL BOT ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
-    embed = discord.Embed(
-        title="🤖 Panel de Comandos de Zapy",
-        description="Lista completa de funciones disponibles:",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="🤖 Panel de Comandos de Zapy", color=discord.Color.blue())
     embed.add_field(name="📌 General", value="`!comandos` - Muestra esta ayuda.", inline=False)
     embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
