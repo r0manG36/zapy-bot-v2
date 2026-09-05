@@ -38,7 +38,8 @@ def obtener_servicio_calendar():
             if not os.path.exists('credentials.json'):
                 return None
             flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+            # open_browser=False evita el error "could not locate runnable browser" en la Raspberry Pi
+            creds = flow.run_local_server(port=0, open_browser=False)
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
     return build('calendar', 'v3', credentials=creds)
