@@ -73,8 +73,8 @@ def obtener_eventos_notion():
     except Exception as err:
         return f"Error al consultar Notion: {err}"
 
-# --- TAREA DE COMPROBACIÓN AUTOMÁTICA ---
-@tasks.loop(minutes=2)
+# --- TAREA DE COMPROBACIÓN AUTOMÁTICA (CADA 15 SEGUNDOS) ---
+@tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
     if not notion or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
         return
@@ -89,7 +89,7 @@ async def comprobar_nuevos_eventos():
         
         ids_conocidos = cargar_ids_procesados()
         
-        # Si es la primera ejecución, guardamos los IDs existentes para no spamear
+        # En la primera ejecución guardamos los datos existentes para no duplicar avisos antiguos
         if not ids_conocidos and results:
             ids_actuales = {page["id"] for page in results}
             guardar_ids_procesados(ids_actuales)
@@ -114,7 +114,7 @@ async def comprobar_nuevos_eventos():
 
                 embed = discord.Embed(
                     title="🆕 Nuevo evento en Notion",
-                    description=f"Se ha añadido un nuevo evento o examen a tu planificación.",
+                    description="Se ha añadido un nuevo evento o examen a tu planificación.",
                     color=discord.Color.green()
                 )
                 embed.add_field(name="📌 Evento", value=nombre, inline=False)
@@ -191,6 +191,7 @@ async def obtener_tiempo():
 async def generar_embed_informe():
     tiempo_info = await obtener_tiempo()
     peticiones_vars = cargar_peticiones()
+    eventos_notion = obtener_eventos_notion()
     ahora = datetime.datetime.now()
 
     embed = discord.Embed(
@@ -199,7 +200,7 @@ async def generar_embed_informe():
         color=discord.Color.gold()
     )
     embed.add_field(name="🌤️ Tiempo en Vitoria-Gasteiz", value=f"`{tiempo_info}`", inline=False)
-    embed.add_field(name="📅 Planificador y Lectura", value="• Revisa tus entregas y exámenes pendientes.\n• Recordatorio: Avanza con la lectura diaria programada.", inline=False)
+    embed.add_field(name="📅 Exámenes y Tareas Pendientes (Notion)", value=f"```{eventos_notion}```", inline=False)
     embed.add_field(name="⚽ Información Deportiva", value="• Consulta los marcadores recientes y próximos partidos de tu jornada.", inline=False)
     embed.add_field(name="📰 Noticias destacadas", value="• Novedades de Inteligencia Artificial y Videojuegos en [3DJuegos](https://www.3djuegos.com) o [Xataka](https://www.xataka.com).", inline=False)
 
