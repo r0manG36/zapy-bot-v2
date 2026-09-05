@@ -3,7 +3,7 @@ import json
 import datetime
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -15,6 +15,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
@@ -24,8 +25,19 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PETICIONES_FILE = "peticiones_informe.json"
+NOTION_CACHE_FILE = "notion_ids.json"
 
-# --- NOTION HELPER ---
+# --- NOTION HELPERS ---
+def cargar_ids_procesados():
+    if os.path.exists(NOTION_CACHE_FILE):
+        with open(NOTION_CACHE_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+def guardar_ids_procesados(ids_set):
+    with open(NOTION_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(ids_set), f, ensure_ascii=False, indent=4)
+
 def obtener_eventos_notion():
     if not notion or not NOTION_DATABASE_ID:
         return "No se ha configurado el Token o el ID de la base de datos de Notion en el archivo .env."
@@ -41,7 +53,6 @@ def obtener_eventos_notion():
         for page in results:
             properties = page.get("properties", {})
             
-            # Obtener nombre/título
             title_prop = properties.get("Nombre") or properties.get("Name") or properties.get("Title") or properties.get("Tarea")
             nombre = "Sin título"
             if title_prop and title_prop.get("title"):
@@ -49,7 +60,6 @@ def obtener_eventos_notion():
                 if len(title_list) > 0:
                     nombre = title_list[0].get("plain_text", "Sin título")
 
-            # Obtener fecha
             date_prop = properties.get("Fecha") or properties.get("Date")
             fecha_str = "Sin fecha asignada"
             if date_prop and date_prop.get("date"):
@@ -62,6 +72,67 @@ def obtener_eventos_notion():
         return "\n".join(eventos)
     except Exception as err:
         return f"Error al consultar Notion: {err}"
+
+# --- TAREA DE COMPROBACIÓN AUTOMÁTICA ---
+@tasks.loop(minutes=2)
+async def comprobar_nuevos_eventos():
+    if not notion or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
+        return
+
+    try:
+        canal = bot.get_channel(int(CANAL_NOTIFICACIONES_ID))
+        if not canal:
+            return
+
+        response = notion.databases.query(database_id=NOTION_DATABASE_ID)
+        results = response.get("results", [])
+        
+        ids_conocidos = cargar_ids_procesados()
+        
+        # Si es la primera ejecución, guardamos los IDs existentes para no spamear
+        if not ids_conocidos and results:
+            ids_actuales = {page["id"] for page in results}
+            guardar_ids_procesados(ids_actuales)
+            return
+
+        nuevos_ids = set()
+
+        for page in results:
+            page_id = page["id"]
+            if page_id not in ids_conocidos:
+                properties = page.get("properties", {})
+                
+                title_prop = properties.get("Nombre") or properties.get("Name") or properties.get("Title") or properties.get("Tarea")
+                nombre = "Sin título"
+                if title_prop and title_prop.get("title") and len(title_prop["title"]) > 0:
+                    nombre = title_prop["title"][0].get("plain_text", "Sin título")
+
+                date_prop = properties.get("Fecha") or properties.get("Date")
+                fecha_str = "Sin fecha asignada"
+                if date_prop and date_prop.get("date") and date_prop["date"]:
+                    fecha_str = date_prop["date"].get("start", "Sin fecha")
+
+                embed = discord.Embed(
+                    title="🆕 Nuevo evento en Notion",
+                    description=f"Se ha añadido un nuevo evento o examen a tu planificación.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="📌 Evento", value=nombre, inline=False)
+                embed.add_field(name="📅 Fecha", value=fecha_str, inline=False)
+                
+                await canal.send(embed=embed)
+                nuevos_ids.add(page_id)
+
+        if nuevos_ids:
+            ids_conocidos.update(nuevos_ids)
+            guardar_ids_procesados(ids_conocidos)
+
+    except Exception as e:
+        print(f"Error comprobando eventos de Notion: {e}")
+
+@comprobar_nuevos_eventos.before_loop
+async def antes_de_comprobar():
+    await bot.wait_until_ready()
 
 SYSTEM_PROMPT = """
 Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Tu objetivo es optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
@@ -144,6 +215,7 @@ async def generar_embed_informe():
 @bot.event
 async def on_ready():
     print(f"Zapy conectado correctamente como {bot.user} e integrado con Notion.")
+    comprobar_nuevos_eventos.start()
 
 @bot.event
 async def on_message(message):
