@@ -102,6 +102,37 @@ async def obtener_eventos_notion(forzar_refresco=False):
     except Exception as err:
         return f"Error al consultar Notion: {err}"
 
+def _crear_tarea_notion_sync(nombre, fecha_str):
+    if not notion or not NOTION_DATABASE_ID:
+        return False
+    try:
+        nueva_pagina = {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": {
+                "Nombre": {
+                    "title": [
+                        {
+                            "text": {
+                                "content": nombre
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        if fecha_str:
+            nueva_pagina["properties"]["Fecha"] = {
+                "date": {
+                    "start": fecha_str
+                }
+            }
+        
+        notion.pages.create(**nueva_pagina)
+        return True
+    except Exception as e:
+        print(f"Error al crear tarea en Notion: {e}")
+        return False
+
 # --- TAREA AUTOMÁTICA CADA 30s OPTIMIZADA ---
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
@@ -165,8 +196,7 @@ async def comprobar_nuevos_eventos():
 async def antes_de_comprobar():
     await bot.wait_until_ready()
 
-SYSTEM_PROMPT = """
-Zapy, a partir de ahora vas a ser un tutor academico experto en todas las areas academicas con los mejores metodos de estudio basados en la ciencia y en opiniones de expertos en el tema. Tambien vas a ser un experto en la organizacion de bloques de estudio y rutinas en general, tambien los metodos que usaras seran basadas en la ciencia y en opiniones de expertos. No hagas muy largas las respuestas
+SYSTEM_PROMPT = """Zapy, a partir de ahora vas a ser un tutor academico experto en todas las areas academicas con los mejores metodos de estudio basados en la ciencia y en opiniones de expertos en el tema. Tambien vas a ser un experto en la organizacion de bloques de estudio y rutinas en general, tambien los metodos que usaras seran basadas en la ciencia y en opiniones de expertos. No hagas muy largas las respuestas
 
 Actualmente, estoy en cuarto del eso cientifico con la siguientes asignaturas: Euskera, Lengua Castellana, Ingles, Geografia e Historia, Educacion Fisica, Tutoria, Matematicas academicas, Fisica y Quimica, Tecnologia, Digitalizacion y Robotica. Todas las asignaturas se explican, se hacen los deberes, proyectos y examenes en Euskera menos Ingles y Lengua Castellana.
 
@@ -222,7 +252,9 @@ Sabado: Los sabados a la mañana/mediodia hay partido y no suelo estar hasta las
 Domingo: Entre las 13:00 y 16:00 no puedo.
 
 Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo:  A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00
+
 """
+
 def cargar_peticiones():
     if os.path.exists(PETICIONES_FILE):
         try:
@@ -323,7 +355,7 @@ async def on_message(message):
                         config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
                             temperature=0.3,
-                            max_output_tokens=1200
+                            max_output_tokens=300
                         )
 
                         response = await asyncio.to_thread(
@@ -349,6 +381,7 @@ async def mostrar_comandos(ctx):
     embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
     embed.add_field(name="📅 Notion", value="`!eventos` - Muestra los exámenes y tareas guardados en Notion.", inline=False)
+    embed.add_field(name="➕ Añadir Tarea", value="`!añadir <nombre> | <AAAA-MM-DD>` - Crea una tarea en Notion.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="clear")
@@ -376,5 +409,23 @@ async def agregar_peticion(ctx, *, texto: str):
 async def ver_eventos(ctx):
     evs = await obtener_eventos_notion()
     await ctx.send(f"📅 **Eventos y exámenes en tu Notion:**\n{evs}")
+
+@bot.command(name="añadir")
+async def añadir_tarea_notion(ctx, *, args: str):
+    if "|" in args:
+        partes = args.split("|")
+        nombre = partes[0].strip()
+        fecha = partes[1].strip()
+    else:
+        nombre = args.strip()
+        fecha = None
+
+    async with ctx.typing():
+        exito = await asyncio.to_thread(_crear_tarea_notion_sync, nombre, fecha)
+        if exito:
+            fecha_texto = f" para el `{fecha}`" if fecha else ""
+            await ctx.send(f"✅ Tarea **{nombre}** añadida correctamente a tu Notion{fecha_texto}.")
+        else:
+            await ctx.send("❌ Hubo un error al conectar con Notion para crear la tarea.")
 
 bot.run(TOKEN)
