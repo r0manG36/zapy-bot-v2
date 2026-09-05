@@ -73,7 +73,7 @@ def obtener_eventos_notion():
     except Exception as err:
         return f"Error al consultar Notion: {err}"
 
-# --- TAREA DE COMPROBACIÓN AUTOMÁTICA (CADA 15 SEGUNDOS) ---
+# --- TAREA DE COMPROBACIÓN AUTOMÁTICA (CADA 30 SEGUNDOS) ---
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
     if not notion or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
@@ -89,7 +89,6 @@ async def comprobar_nuevos_eventos():
         
         ids_conocidos = cargar_ids_procesados()
         
-        # En la primera ejecución guardamos los datos existentes para no duplicar avisos antiguos
         if not ids_conocidos and results:
             ids_actuales = {page["id"] for page in results}
             guardar_ids_procesados(ids_actuales)
@@ -188,8 +187,53 @@ async def obtener_tiempo():
         pass
     return "No se pudo obtener la previsión del tiempo."
 
+async def obtener_noticias_y_deportes():
+    if not client_gemini:
+        return "Noticias no disponibles.", "Marcadores no disponibles."
+
+    prompt = """
+    Realiza una búsqueda web y genera dos bloques concisos:
+
+    BLOQUE DEPORTES:
+    Busca los marcadores o partidos destacados de fútbol de hoy (LaLiga, Champions o partidos principales).
+    Resume en máximo 3 líneas los resultados o próximos encuentros con sus equipos y horarios/marcadores. Añade el enlace exacto a la fuente.
+
+    BLOQUE NOTICIAS TECNOLOGÍA/IA/VIDEOJUEGOS:
+    Busca 1 o 2 noticias relevantes de hoy en Xataka o 3DJuegos sobre IA, Tecnología o Videojuegos.
+    Escribe un resumen de exactamente 3 líneas por noticia y añade el enlace markdown directo a la noticia [Título noticia](URL).
+
+    Formato de respuesta estricto:
+    ---DEPORTES---
+    [Contenido de deportes]
+    ---NOTICIAS---
+    [Contenido de noticias]
+    """
+
+    try:
+        config = types.GenerateContentConfig(
+            tools=[{"google_search": {}}],
+            temperature=0.2,
+            max_output_tokens=800
+        )
+        response = client_gemini.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=prompt,
+            config=config
+        )
+
+        texto = response.text or ""
+        partes = texto.split("---NOTICIAS---")
+        deportes_txt = partes[0].replace("---DEPORTES---", "").strip() if len(partes) > 0 else "Sin información de deportes."
+        noticias_txt = partes[1].strip() if len(partes) > 1 else "Sin noticias destacadas."
+
+        return deportes_txt, noticias_txt
+    except Exception as e:
+        print(f"Error obteniendo noticias: {e}")
+        return "Error consultando marcadores.", "Error consultando noticias."
+
 async def generar_embed_informe():
     tiempo_info = await obtener_tiempo()
+    deportes_info, noticias_info = await obtener_noticias_y_deportes()
     peticiones_vars = cargar_peticiones()
     eventos_notion = obtener_eventos_notion()
     ahora = datetime.datetime.now()
@@ -201,8 +245,8 @@ async def generar_embed_informe():
     )
     embed.add_field(name="🌤️ Tiempo en Vitoria-Gasteiz", value=f"`{tiempo_info}`", inline=False)
     embed.add_field(name="📅 Exámenes y Tareas Pendientes (Notion)", value=f"```{eventos_notion}```", inline=False)
-    embed.add_field(name="⚽ Información Deportiva", value="• Consulta los marcadores recientes y próximos partidos de tu jornada.", inline=False)
-    embed.add_field(name="📰 Noticias destacadas", value="• Novedades de Inteligencia Artificial y Videojuegos en [3DJuegos](https://www.3djuegos.com) o [Xataka](https://www.xataka.com).", inline=False)
+    embed.add_field(name="⚽ Información Deportiva", value=deportes_info, inline=False)
+    embed.add_field(name="📰 Noticias destacadas", value=noticias_info, inline=False)
 
     if peticiones_vars:
         texto_vars = "\n".join([f"• {p}" for p in peticiones_vars])
@@ -283,8 +327,9 @@ async def limpiar_mensajes(ctx, cantidad: int = None):
 
 @bot.command(name="informe")
 async def enviar_informe(ctx):
-    embed = await generar_embed_informe()
-    await ctx.send(embed=embed)
+    async with ctx.typing():
+        embed = await generar_embed_informe()
+        await ctx.send(embed=embed)
 
 @bot.command(name="peticion")
 async def agregar_peticion(ctx, *, texto: str):
