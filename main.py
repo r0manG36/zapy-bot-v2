@@ -6,67 +6,62 @@ import discord
 from discord.ext import commands
 from google import genai
 from google.genai import types
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from dotenv import load_dotenv
+from notion_client import Client
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
+notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 PETICIONES_FILE = "peticiones_informe.json"
-SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-# --- GOOGLE CALENDAR HELPER ---
-def obtener_servicio_calendar():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('credentials.json'):
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            # open_browser=False evita el error "could not locate runnable browser" en la Raspberry Pi
-            creds = flow.run_local_server(port=0, open_browser=False)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return build('calendar', 'v3', credentials=creds)
-
-def obtener_eventos_proximos():
-    service = obtener_servicio_calendar()
-    if not service:
-        return "No se pudo conectar a Google Calendar (falta credentials.json o token.json)."
+# --- NOTION HELPER ---
+def obtener_eventos_notion():
+    if not notion or not NOTION_DATABASE_ID:
+        return "No se ha configurado el Token o el ID de la base de datos de Notion en el archivo .env."
     
-    ahora = datetime.datetime.utcnow().isoformat() + 'Z'
     try:
-        eventos_result = service.events().list(
-            calendarId='primary', timeMin=ahora, maxResults=15, singleEvents=True,
-            orderBy='startTime'
-        ).execute()
+        response = notion.databases.query(database_id=NOTION_DATABASE_ID)
+        results = response.get("results", [])
         
-        eventos = eventos_result.get('items', [])
-        if not eventos:
-            return "No hay eventos próximos registrados en Google Calendar."
+        if not results:
+            return "No hay eventos ni exámenes registrados actualmente en Notion."
         
-        resumen = []
-        for e in eventos:
-            inicio = e['start'].get('dateTime', e['start'].get('date'))
-            resumen.append(f"- {e.get('summary', 'Sin título')} ({inicio})")
-        return "\n".join(resumen)
+        eventos = []
+        for page in results:
+            properties = page.get("properties", {})
+            
+            # Obtener nombre/título
+            title_prop = properties.get("Nombre") or properties.get("Name") or properties.get("Title") or properties.get("Tarea")
+            nombre = "Sin título"
+            if title_prop and title_prop.get("title"):
+                title_list = title_prop["title"]
+                if len(title_list) > 0:
+                    nombre = title_list[0].get("plain_text", "Sin título")
+
+            # Obtener fecha
+            date_prop = properties.get("Fecha") or properties.get("Date")
+            fecha_str = "Sin fecha asignada"
+            if date_prop and date_prop.get("date"):
+                date_val = date_prop["date"]
+                if date_val:
+                    fecha_str = date_val.get("start", "Sin fecha")
+
+            eventos.append(f"- {nombre} ({fecha_str})")
+
+        return "\n".join(eventos)
     except Exception as err:
-        return f"Error al consultar Google Calendar: {err}"
+        return f"Error al consultar Notion: {err}"
 
 SYSTEM_PROMPT = """
 Eres Zapy, un tutor académico experto en todas las áreas académicas con los mejores métodos de estudio basados en la ciencia (Active Recall, Spaced Repetition, Técnica Pomodoro, Blurting, Feynman). Tu objetivo es optimizar el tiempo al máximo y obtener la máxima nota estudiando la menor cantidad de horas.
@@ -87,7 +82,7 @@ HORARIOS Y BLOQUEOS FIJOS DEL ESTUDIANTE:
 - Prioridad general: Garantizar entre 8 y 9 horas de sueño.
 
 INSTRUCCIONES DE ACTUACIÓN:
-1. Ten en cuenta tanto tus bloques fijos como los eventos leídos de Google Calendar.
+1. Ten en cuenta tanto tus bloques fijos como los exámenes/tareas leídos desde Notion.
 2. Si el usuario pide planificar o responde a preguntas sobre entregas/exámenes, GENERA LA RUTINA EXACTA indicando: hora de inicio y fin, asignatura, método concreto (explicado brevemente) y tarea a realizar. Sé conciso y estructurado.
 """
 
@@ -148,7 +143,7 @@ async def generar_embed_informe():
 
 @bot.event
 async def on_ready():
-    print(f"Zapy con Google Calendar listo como {bot.user}")
+    print(f"Zapy conectado correctamente como {bot.user} e integrado con Notion.")
 
 @bot.event
 async def on_message(message):
@@ -171,8 +166,8 @@ async def on_message(message):
                         destino = message.channel
 
                     async with destino.typing():
-                        eventos_cal = obtener_eventos_proximos()
-                        prompt_completo = f"EVENTOS ACTUALES EN GOOGLE CALENDAR:\n{eventos_cal}\n\nPETICIÓN DEL ALUMNO:\n{texto_limpio}"
+                        eventos_notion = obtener_eventos_notion()
+                        prompt_completo = f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\nPETICIÓN DEL ALUMNO:\n{texto_limpio}"
 
                         config = types.GenerateContentConfig(
                             system_instruction=SYSTEM_PROMPT,
@@ -201,7 +196,7 @@ async def mostrar_comandos(ctx):
     embed.add_field(name="🧹 Limpieza", value="`!clear [cantidad]` - Borra mensajes del canal o hilo.", inline=False)
     embed.add_field(name="📰 Informe Diario", value="`!informe` - Genera y envía el resumen diario.", inline=False)
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
-    embed.add_field(name="📅 Calendario", value="`!eventos` - Muestra los próximos eventos de Google Calendar.", inline=False)
+    embed.add_field(name="📅 Notion", value="`!eventos` - Muestra los exámenes y tareas guardados en Notion.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="clear")
@@ -227,7 +222,7 @@ async def agregar_peticion(ctx, *, texto: str):
 
 @bot.command(name="eventos")
 async def ver_eventos(ctx):
-    evs = obtener_eventos_proximos()
-    await ctx.send(f"📅 **Próximos eventos en tu Google Calendar:**\n{evs}")
+    evs = obtener_eventos_notion()
+    await ctx.send(f"📅 **Eventos y exámenes en tu Notion:**\n{evs}")
 
 bot.run(TOKEN)
