@@ -34,6 +34,78 @@ NOTION_EVENTOS_CACHE = None
 NOTION_CACHE_TIMESTAMP = None
 CACHE_TTL_SEGUNDOS = 60
 
+# --- PROMPTS DE SISTEMA ---
+SYSTEM_PROMPT = """Zapy, a partir de ahora vas a ser un tutor academico experto en todas las areas academicas con los mejores metodos de estudio basados en la ciencia y en opiniones de expertos en el tema. Tambien vas a ser un experto en la organizacion de bloques de estudio y rutinas en general, tambien los metodos que usaras seran basadas en la ciencia y en opiniones de expertos. Tienes que hacer que las respuestas no sean muy largas dandome todo el contexto todo el rato, pon solo lo necesario y si te pido contexto me lo das sino, no.
+
+Actualmente, estoy en cuarto del eso cientifico con la siguientes asignaturas: Euskera, Lengua Castellana, Ingles, Geografia e Historia, Educacion Fisica, Tutoria, Matematicas academicas, Fisica y Quimica, Tecnologia, Digitalizacion y Robotica. Todas las asignaturas se explican, se hacen los deberes, proyectos y examenes en Euskera menos Ingles y Lengua Castellana.
+
+Mi objetivos son tener una rutina muy bien estructurada para un estudio muy bueno y con la menor cantidad de horas de estudio gracias a los mejores metodos de estudio. Asi que necesito una rutina para cada dia o semana o periodo acorde a mis necesidades. Todo esto para sacar la maxima nota en cada asignatura.
+
+Esta es mi rutina semanal con todos los horarios exactos, mis impedimentos, mis preferencias, mis huecos libres…:
+
+
+Lunes 
+
+- Hora de despertar / inicio del día: 7:10
+- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
+- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20
+:30 entrenar, 20:30 - 21:30 volver a casa y cenar
+- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
+
+Martes
+
+- Hora de despertar / inicio del día: 7:10
+- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
+- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 20:00 - 21:30 Estar con Familia y Cenar
+- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
+
+Miercoles
+
+- Hora de despertar / inicio del día: 7:10
+- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
+- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20:30 entrenar, 20:30 - 21:30 volver a casa y cenar
+- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
+
+Jueves
+
+- Hora de despertar / inicio del día: 7:10
+- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
+- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 19:30 - 21:45 entrenar, 22:00 - 22:30 volver a casa y cenar
+- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
+
+Viernes
+
+- Hora de despertar / inicio del día: 7:10
+- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
+- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, las tardes del viernes no estudio
+- Hora de cierre / descanso nocturno: Nunca se sabe, pero tarde
+
+
+Sabado: Los sabados a la mañana/mediodia hay partido y no suelo estar hasta las 16:00
+
+Domingo: Entre las 13:00 y 16:00 no puedo.
+
+Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo:  A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00"""
+
+SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
+El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
+ESTRUCTURA Y REGLAS DE FORMATO:
+Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
+Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
+Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX (... para texto y
+...
+para ecuaciones centradas), explicando el significado y las unidades de cada variable.
+Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
+Resolución Paso a Paso (Modelos de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
+Sección "Trampas de Examen": Añade un apartado especial señalando los errores típicos que cometen los alumnos en este tema y cómo evitarlos.
+Bloque de Active Recall (Autoevaluación): Finaliza con una lista de 5 a 8 preguntas tipo test o de desarrollo corto (con sus respuestas ocultas o al final) para que el estudiante evalúe su retención al terminar de leer.
+Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea."""
+
 # --- NOTION HELPERS OPTIMIZADOS ---
 def _cargar_ids_disco():
     if os.path.exists(NOTION_CACHE_FILE):
@@ -133,6 +205,63 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         print(f"Error al crear tarea en Notion: {e}")
         return False
 
+def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
+    if not notion or not NOTION_DATABASE_ID:
+        return False
+    try:
+        nueva_pagina = notion.pages.create(
+            parent={"database_id": NOTION_DATABASE_ID},
+            properties={
+                "Nombre": {
+                    "title": [{"text": {"content": f"Masterclass: {tema} ({asignatura})"}}]
+                }
+            }
+        )
+        page_id = nueva_pagina["id"]
+
+        bloques = []
+        lineas = contenido_markdown.split("\n")
+        
+        for linea in lineas:
+            if linea.startswith("# "):
+                bloques.append({
+                    "object": "block",
+                    "type": "heading_1",
+                    "heading_1": {"rich_text": [{"type": "text", "text": {"content": linea.replace("# ", "")[:2000]}}]}
+                })
+            elif linea.startswith("## "):
+                bloques.append({
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": linea.replace("## ", "")[:2000]}}]}
+                })
+            elif linea.startswith("### "):
+                bloques.append({
+                    "object": "block",
+                    "type": "heading_3",
+                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": linea.replace("### ", "")[:2000]}}]}
+                })
+            elif linea.startswith("- "):
+                bloques.append({
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": linea.replace("- ", "")[:2000]}}]}
+                })
+            elif linea.strip() != "":
+                bloques.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": linea[:2000]}}]}
+                })
+
+        for i in range(0, len(bloques), 100):
+            notion.blocks.children.append(block_id=page_id, children=bloques[i:i+100])
+
+        return True
+    except Exception as e:
+        print(f"Error al crear apuntes completos en Notion: {e}")
+        return False
+
 # --- TAREA AUTOMÁTICA CADA 30s OPTIMIZADA ---
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
@@ -195,65 +324,6 @@ async def comprobar_nuevos_eventos():
 @comprobar_nuevos_eventos.before_loop
 async def antes_de_comprobar():
     await bot.wait_until_ready()
-
-SYSTEM_PROMPT = """Zapy, a partir de ahora vas a ser un tutor academico experto en todas las areas academicas con los mejores metodos de estudio basados en la ciencia y en opiniones de expertos en el tema. Tambien vas a ser un experto en la organizacion de bloques de estudio y rutinas en general, tambien los metodos que usaras seran basadas en la ciencia y en opiniones de expertos. No hagas muy largas las respuestas
-
-Actualmente, estoy en cuarto del eso cientifico con la siguientes asignaturas: Euskera, Lengua Castellana, Ingles, Geografia e Historia, Educacion Fisica, Tutoria, Matematicas academicas, Fisica y Quimica, Tecnologia, Digitalizacion y Robotica. Todas las asignaturas se explican, se hacen los deberes, proyectos y examenes en Euskera menos Ingles y Lengua Castellana.
-
-Mi objetivos son tener una rutina muy bien estructurada para un estudio muy bueno y con la menor cantidad de horas de estudio gracias a los mejores metodos de estudio. Asi que necesito una rutina para cada dia o semana o periodo acorde a mis necesidades. Todo esto para sacar la maxima nota en cada asignatura.
-
-Esta es mi rutina semanal con todos los horarios exactos, mis impedimentos, mis preferencias, mis huecos libres…:
-
-
-Lunes 
-
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20
-:30 entrenar, 20:30 - 21:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Martes
-
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 20:00 - 21:30 Estar con Familia y Cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Miercoles
-
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20:30 entrenar, 20:30 - 21:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Jueves
-
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 19:30 - 21:45 entrenar, 22:00 - 22:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Viernes
-
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, las tardes del viernes no estudio
-- Hora de cierre / descanso nocturno: Nunca se sabe, pero tarde
-
-
-Sabado: Los sabados a la mañana/mediodia hay partido y no suelo estar hasta las 16:00
-
-Domingo: Entre las 13:00 y 16:00 no puedo.
-
-Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo:  A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00
-
-"""
 
 def cargar_peticiones():
     if os.path.exists(PETICIONES_FILE):
@@ -382,6 +452,7 @@ async def mostrar_comandos(ctx):
     embed.add_field(name="📝 Peticiones", value="`!peticion <texto>` - Añade una nota al próximo informe.", inline=False)
     embed.add_field(name="📅 Notion", value="`!eventos` - Muestra los exámenes y tareas guardados en Notion.", inline=False)
     embed.add_field(name="➕ Añadir Tarea", value="`!añadir <nombre> | <AAAA-MM-DD>` - Crea una tarea en Notion.", inline=False)
+    embed.add_field(name="🚀 Generar Masterclass", value="`!apuntes <Asignatura> | <Tema>` - Crea apuntes hiperdetallados en Notion.", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="clear")
@@ -427,5 +498,38 @@ async def añadir_tarea_notion(ctx, *, args: str):
             await ctx.send(f"✅ Tarea **{nombre}** añadida correctamente a tu Notion{fecha_texto}.")
         else:
             await ctx.send("❌ Hubo un error al conectar con Notion para crear la tarea.")
+
+@bot.command(name="apuntes")
+async def generar_apuntes_completos(ctx, *, args: str):
+    if "|" in args:
+        partes = args.split("|")
+        asignatura = partes[0].strip()
+        tema = partes[1].strip()
+    else:
+        await ctx.send("⚠️ Usa el formato: `!apuntes <Asignatura> | <Tema>`")
+        return
+
+    async with ctx.typing():
+        prompt_peticion = f"Elabora la Masterclass Completa sobre el tema '{tema}' de la asignatura de '{asignatura}'."
+
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT_MASTERCLASS,
+            temperature=0.3,
+            max_output_tokens=3000
+        )
+
+        response = await asyncio.to_thread(
+            client_gemini.models.generate_content,
+            model="gemini-3.5-flash-lite",
+            contents=prompt_peticion,
+            config=config
+        )
+
+        exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
+
+        if exito:
+            await ctx.send(f"🚀 **Masterclass generada:** Se ha creado la página completa de **{tema}** ({asignatura}) en tu Notion.")
+        else:
+            await ctx.send("❌ Hubo un error al exportar la masterclass a Notion.")
 
 bot.run(TOKEN)
