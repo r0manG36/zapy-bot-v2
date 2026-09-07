@@ -18,6 +18,28 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 
+# --- MAPEO DE ASIGNATURAS A SUS IDs DE NOTION ---
+NOTION_ASIGNATURAS_MAP = {
+    "mates": os.getenv("NOTION_MATES_ID"),
+    "matematicas": os.getenv("NOTION_MATES_ID"),
+    "fyq": os.getenv("NOTION_FYQ_ID"),
+    "fisica y quimica": os.getenv("NOTION_FYQ_ID"),
+    "fisica": os.getenv("NOTION_FYQ_ID"),
+    "quimica": os.getenv("NOTION_FYQ_ID"),
+    "tecno": os.getenv("NOTION_TECNO_ID"),
+    "tecnologia": os.getenv("NOTION_TECNO_ID"),
+    "digi": os.getenv("NOTION_DIGI_ID"),
+    "digitalizacion": os.getenv("NOTION_DIGI_ID"),
+    "robotica": os.getenv("NOTION_ROBOTICA_ID"),
+    "euskera": os.getenv("NOTION_EUSKERA_ID"),
+    "lengua": os.getenv("NOTION_LENGUA_ID"),
+    "ingles": os.getenv("NOTION_INGLES_ID"),
+    "geo-hist": os.getenv("NOTION_GEOHIST_ID"),
+    "geografia e historia": os.getenv("NOTION_GEOHIST_ID"),
+    "historia": os.getenv("NOTION_GEOHIST_ID"),
+    "geografia": os.getenv("NOTION_GEOHIST_ID")
+}
+
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 
@@ -43,18 +65,14 @@ Mi objetivos son tener una rutina muy bien estructurada para un estudio muy buen
 
 Esta es mi rutina semanal con todos los horarios exactos, mis impedimentos, mis preferencias, mis huecos libres…:
 
-
 Lunes 
-
 - Hora de despertar / inicio del día: 7:10
 - Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
 - Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20
-:30 entrenar, 20:30 - 21:30 volver a casa y cenar
+- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20:30 entrenar, 20:30 - 21:30 volver a casa y cenar
 - Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
 
 Martes
-
 - Hora de despertar / inicio del día: 7:10
 - Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
 - Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
@@ -62,7 +80,6 @@ Martes
 - Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
 
 Miercoles
-
 - Hora de despertar / inicio del día: 7:10
 - Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
 - Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
@@ -70,7 +87,6 @@ Miercoles
 - Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
 
 Jueves
-
 - Hora de despertar / inicio del día: 7:10
 - Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
 - Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
@@ -78,28 +94,23 @@ Jueves
 - Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
 
 Viernes
-
 - Hora de despertar / inicio del día: 7:10
 - Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
 - Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
 - Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, las tardes del viernes no estudio
 - Hora de cierre / descanso nocturno: Nunca se sabe, pero tarde
 
-
 Sabado: Los sabados a la mañana/mediodia hay partido y no suelo estar hasta las 16:00
-
 Domingo: Entre las 13:00 y 16:00 no puedo.
 
-Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo:  A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00"""
+Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo: A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00"""
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
 El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
 ESTRUCTURA Y REGLAS DE FORMATO:
 Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
 Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
-Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX (... para texto y
-...
-para ecuaciones centradas), explicando el significado y las unidades de cada variable.
+Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX, explicando el significado y las unidades de cada variable.
 Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
 Resolución Paso a Paso (Modelos de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
 Sección "Trampas de Examen": Añade un apartado especial señalando los errores típicos que cometen los alumnos en este tema y cómo evitarlos.
@@ -206,14 +217,16 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         return False
 
 def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
-    if not notion or not NOTION_DATABASE_ID:
+    # Buscar ID de la asignatura en el mapeo o recurrir a la general
+    db_target = NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
+    if not notion or not db_target:
         return False
     try:
         nueva_pagina = notion.pages.create(
-            parent={"database_id": NOTION_DATABASE_ID},
+            parent={"database_id": db_target},
             properties={
                 "Nombre": {
-                    "title": [{"text": {"content": f"Masterclass: {tema} ({asignatura})"}}]
+                    "title": [{"text": {"content": f"Masterclass: {tema}"}}]
                 }
             }
         )
@@ -430,7 +443,7 @@ async def on_message(message):
 
                         response = await asyncio.to_thread(
                             client_gemini.models.generate_content,
-                            model="gemini-3.5-flash-lite",
+                            model="gemini-1.5-flash",
                             contents=prompt_completo,
                             config=config
                         )
@@ -520,7 +533,7 @@ async def generar_apuntes_completos(ctx, *, args: str):
 
         response = await asyncio.to_thread(
             client_gemini.models.generate_content,
-            model="gemini-3.5-flash-lite",
+            model="gemini-1.5-flash",
             contents=prompt_peticion,
             config=config
         )
@@ -528,7 +541,7 @@ async def generar_apuntes_completos(ctx, *, args: str):
         exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
 
         if exito:
-            await ctx.send(f"🚀 **Masterclass generada:** Se ha creado la página completa de **{tema}** ({asignatura}) en tu Notion.")
+            await ctx.send(f"🚀 **Masterclass generada:** Se ha creado la página completa de **{tema}** ({asignatura.capitalize()}) en tu Notion.")
         else:
             await ctx.send("❌ Hubo un error al exportar la masterclass a Notion.")
 
