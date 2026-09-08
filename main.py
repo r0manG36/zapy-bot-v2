@@ -19,7 +19,7 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 
-# --- MODELO UNIFICADO E INQUEBRANTABLE ---
+# --- MODELO DE GEMINI ---
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 # --- MAPEO DE ASIGNATURAS A SUS IDs DE NOTION ---
@@ -110,56 +110,20 @@ Domingo: Entre las 13:00 y 16:00 no puedo.
 Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo: A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00"""
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
-El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
+El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro.
+
 ESTRUCTURA Y REGLAS DE FORMATO:
-Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
-Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
-Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, escribe las fórmulas en texto claro y legible de forma tradicional (evita el uso de código LaTeX con barras inclinadas o comillas).
-Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
-Resolución Paso a Paso (Modelos de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
-Sección "Trampas de Examen": Añade un apartado especial señalando los errores típicos que cometen los alumnos en este tema y cómo evitarlos.
-Bloque de Active Recall (Autoevaluación): Finaliza con una lista de 5 a 8 preguntas tipo test o de desarrollo corto (con sus respuestas ocultas o al final) para que el estudiante evalúe su retención al terminar de leer.
-Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea."""
+1. Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos.
+2. Glosario de Conceptos Clave: Destaca definiciones exactas.
+3. Formulario Formal LaTeX: Escribe TODAS las fórmulas matemáticas y pasos principales de ejercicios en bloques separados usando el formato $$ expresión $$. Por ejemplo:
+$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$
+Para variables dentro del texto usa $x$.
+4. Desglose de Conceptos: Emplea listas con viñetas (- ).
+5. Resolución Paso a Paso: Desarrolla al menos 2 ejercicios con todo el desarrollo en LaTeX en bloques $$.
+6. Sección "Trampas de Examen": Errores típicos a evitar.
+7. Bloque de Active Recall: Preguntas de autoevaluación al final."""
 
-# --- LIMPIADOR DE TEXTO Y FORMULAS PARA NOTION ---
-def _limpiar_texto_notion(texto):
-    """Transforma el formato LaTeX a texto legible normal y remueve asteriscos."""
-    # Convertir fracciones \frac{a}{b} -> (a / b)
-    texto = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1 / \2)', texto)
-    # Convertir raíces \sqrt[n]{x} o \sqrt{x}
-    texto = re.sub(r'\\sqrt\[([^}]+)\]\{([^}]+)\}', r'raíz_\1(\2)', texto)
-    texto = re.sub(r'\\sqrt\{([^}]+)\}', r'raíz(\1)', texto)
-    
-    # Reemplazar comandos LaTeX comunes por texto plano
-    reemplazos = {
-        r'\mathbb{R}': 'R',
-        r'\text{Dom}': 'Dom',
-        r'\text': '',
-        r'\ge': '>=',
-        r'\le': '<=',
-        r'\geq': '>=',
-        r'\leq': '<=',
-        r'\neq': '!=',
-        r'\setminus': ' / ',
-        r'\in': 'pertenece a',
-        r'\dots': '...',
-        r'\log': 'log',
-        r'\cdot': '·',
-        '{': '',
-        '}': ''
-    }
-    for orig, reemplazo in reemplazos.items():
-        texto = texto.replace(orig, reemplazo)
-        
-    # Eliminar los delimitadores de LaTeX ($ y $$)
-    texto = re.sub(r'\$\$(.*?)\$\$', r'\1', texto)
-    texto = re.sub(r'\$(.*?)\$', r'\1', texto)
-    
-    # Quitar los asteriscos de formato de Markdown (** y *)
-    texto = texto.replace("**", "").replace("*", "")
-    return texto.strip()
-
-# --- NOTION HELPERS OPTIMIZADOS ---
+# --- NOTION HELPERS Y PARSER DE ESTRUCTURA ---
 def _cargar_ids_disco():
     if os.path.exists(NOTION_CACHE_FILE):
         try:
@@ -235,21 +199,13 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
             "parent": {"database_id": NOTION_DATABASE_ID},
             "properties": {
                 "Nombre": {
-                    "title": [
-                        {
-                            "text": {
-                                "content": nombre
-                            }
-                        }
-                    ]
+                    "title": [{"text": {"content": nombre}}]
                 }
             }
         }
         if fecha_str:
             nueva_pagina["properties"]["Fecha"] = {
-                "date": {
-                    "start": fecha_str
-                }
+                "date": {"start": fecha_str}
             }
         
         notion.pages.create(**nueva_pagina)
@@ -257,6 +213,56 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
     except Exception as e:
         print(f"Error al crear tarea en Notion: {e}")
         return False
+
+def _convertir_linea_a_bloque_notion(linea):
+    linea = linea.strip()
+    if not linea:
+        return None
+
+    # Bloques de fórmula nativa de Notion $$ ... $$
+    if linea.startswith("$$") and linea.endswith("$$"):
+        expr = linea[2:-2].strip()
+        return {
+            "object": "block",
+            "type": "equation",
+            "equation": {"expression": expr}
+        }
+
+    # Encabezados
+    if linea.startswith("# "):
+        return {
+            "object": "block",
+            "type": "heading_1",
+            "heading_1": {"rich_text": [{"type": "text", "text": {"content": linea[2:].strip()[:2000]}}]}
+        }
+    elif linea.startswith("## "):
+        return {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": linea[3:].strip()[:2000]}}]}
+        }
+    elif linea.startswith("### "):
+        return {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {"rich_text": [{"type": "text", "text": {"content": linea[4:].strip()[:2000]}}]}
+        }
+
+    # Viñetas
+    elif linea.startswith("- ") or linea.startswith("* "):
+        return {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": linea[2:].strip()[:2000]}}]}
+        }
+
+    # Párrafo estándar
+    else:
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": linea[:2000]}}]}
+        }
 
 def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
     db_target = NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
@@ -277,40 +283,9 @@ def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
         lineas = contenido_markdown.split("\n")
         
         for linea in lineas:
-            linea_limpia = _limpiar_texto_notion(linea)
-            if not linea_limpia:
-                continue
-
-            if linea.startswith("# "):
-                bloques.append({
-                    "object": "block",
-                    "type": "heading_1",
-                    "heading_1": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
-                })
-            elif linea.startswith("## "):
-                bloques.append({
-                    "object": "block",
-                    "type": "heading_2",
-                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
-                })
-            elif linea.startswith("### "):
-                bloques.append({
-                    "object": "block",
-                    "type": "heading_3",
-                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
-                })
-            elif linea.startswith("- ") or linea.startswith("* "):
-                bloques.append({
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
-                })
-            else:
-                bloques.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
-                })
+            bloque = _convertir_linea_a_bloque_notion(linea)
+            if bloque:
+                bloques.append(bloque)
 
         for i in range(0, len(bloques), 100):
             notion.blocks.children.append(block_id=page_id, children=bloques[i:i+100])
@@ -320,7 +295,7 @@ def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
         print(f"Error al crear apuntes completos en Notion: {e}")
         return False
 
-# --- TAREA AUTOMÁTICA CADA 30s OPTIMIZADA ---
+# --- TAREA AUTOMÁTICA EN SEGUNDO PLANO ---
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
     global IDS_MEMORIA_RAM
@@ -456,7 +431,6 @@ async def on_ready():
     if not comprobar_nuevos_eventos.is_running():
         comprobar_nuevos_eventos.start()
 
-# --- EVENTO ON_MESSAGE RESILIENTE ---
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -476,7 +450,7 @@ async def on_message(message):
                     try:
                         destino = await message.create_thread(name=f"Planificación - {message.author.display_name}")
                     except Exception as err_hilo:
-                        print(f"No se pudo crear el hilo (usando canal principal): {err_hilo}")
+                        print(f"No se pudo crear el hilo: {err_hilo}")
                         destino = message.channel
 
                 try:
