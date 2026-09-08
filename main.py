@@ -217,7 +217,6 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         return False
 
 def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
-    # Buscar ID de la asignatura en el mapeo o recurrir a la general
     db_target = NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
     if not notion or not db_target:
         return False
@@ -332,7 +331,7 @@ async def comprobar_nuevos_eventos():
             await obtener_eventos_notion(forzar_refresco=True)
 
     except Exception as e:
-        print(f"Excepción aislada en bucle Notion (resiliencia activada): {e}")
+        print(f"Excepción aislada en bucle Notion: {e}")
 
 @comprobar_nuevos_eventos.before_loop
 async def antes_de_comprobar():
@@ -411,6 +410,7 @@ async def on_ready():
     if not comprobar_nuevos_eventos.is_running():
         comprobar_nuevos_eventos.start()
 
+# --- EVENTO ON_MESSAGE RESILIENTE ---
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -423,14 +423,18 @@ async def on_message(message):
 
         if es_hilo or es_mencion or es_dm:
             if client_gemini:
-                try:
-                    texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
-
-                    if not es_hilo and not es_dm and hasattr(message, "create_thread"):
+                texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
+                
+                # Intentar crear un hilo si no estamos en uno
+                destino = message.channel
+                if not es_hilo and not es_dm:
+                    try:
                         destino = await message.create_thread(name=f"Planificación - {message.author.display_name}")
-                    else:
+                    except Exception as err_hilo:
+                        print(f"No se pudo crear el hilo (usando canal principal): {err_hilo}")
                         destino = message.channel
 
+                try:
                     async with destino.typing():
                         eventos_notion = await obtener_eventos_notion()
                         prompt_completo = f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\nPETICIÓN DEL ALUMNO:\n{texto_limpio}"
@@ -449,7 +453,8 @@ async def on_message(message):
                         )
                         await enviar_mensaje_largo(destino, response.text)
                 except Exception as e:
-                    await message.channel.send(f"❌ Error al procesar la solicitud: {e}")
+                    print(f"Error de ejecución en Gemini: {e}")
+                    await destino.send(f"❌ Ocurrió un error al responder: {e}")
             else:
                 await message.channel.send("⚠️ La API de Gemini no está configurada correctamente.")
 
