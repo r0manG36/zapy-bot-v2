@@ -18,6 +18,9 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 
+# --- MODELO UNIFICADO E INQUEBRANTABLE ---
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+
 # --- MAPEO DE ASIGNATURAS A SUS IDs DE NOTION ---
 NOTION_ASIGNATURAS_MAP = {
     "mates": os.getenv("NOTION_MATES_ID"),
@@ -112,7 +115,7 @@ Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido 
 Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
 Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX, explicando el significado y las unidades de cada variable.
 Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
-Resolución Paso a Paso (os de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
+Resolución Paso a Paso (Modelos de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
 Sección "Trampas de Examen": Añade un apartado especial señalando los errores típicos que cometen los alumnos en este tema y cómo evitarlos.
 Bloque de Active Recall (Autoevaluación): Finaliza con una lista de 5 a 8 preguntas tipo test o de desarrollo corto (con sus respuestas ocultas o al final) para que el estudiante evalúe su retención al terminar de leer.
 Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea."""
@@ -425,7 +428,6 @@ async def on_message(message):
             if client_gemini:
                 texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
                 
-                # Intentar crear un hilo si no estamos en uno
                 destino = message.channel
                 if not es_hilo and not es_dm:
                     try:
@@ -446,8 +448,8 @@ async def on_message(message):
                         )
 
                         response = await asyncio.to_thread(
-                            client_gemini.s.generate_content,
-                            model="gemini-3.5-flash-lite",
+                            client_gemini.models.generate_content,
+                            model=GEMINI_MODEL,
                             contents=prompt_completo,
                             config=config
                         )
@@ -528,26 +530,31 @@ async def generar_apuntes_completos(ctx, *, args: str):
         return
 
     async with ctx.typing():
-        prompt_peticion = f"Elabora la Masterclass Completa sobre el tema '{tema}' de la asignatura de '{asignatura}'."
+        try:
+            prompt_peticion = f"Elabora la Masterclass Completa sobre el tema '{tema}' de la asignatura de '{asignatura}'."
 
-        config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT_MASTERCLASS,
-            temperature=0.3,
-            max_output_tokens=3000
-        )
+            config = types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT_MASTERCLASS,
+                temperature=0.3,
+                max_output_tokens=3000
+            )
 
-        response = await asyncio.to_thread(
-            client_gemini.models.generate_content,
-            model="gemini-1.5-flash",
-            contents=prompt_peticion,
-            config=config
-        )
+            response = await asyncio.to_thread(
+                client_gemini.models.generate_content,
+                model=GEMINI_MODEL,
+                contents=prompt_peticion,
+                config=config
+            )
 
-        exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
+            exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
 
-        if exito:
-            await ctx.send(f"🚀 **Masterclass generada:** Se ha creado la página completa de **{tema}** ({asignatura.capitalize()}) en tu Notion.")
-        else:
-            await ctx.send("❌ Hubo un error al exportar la masterclass a Notion.")
+            if exito:
+                await ctx.send(f"🚀 **Masterclass generada:** Se ha creado la página completa de **{tema}** ({asignatura.capitalize()}) en tu Notion.")
+            else:
+                await ctx.send("❌ Hubo un error al exportar la masterclass a Notion.")
+
+        except Exception as e:
+            print(f"Error en comando !apuntes: {e}")
+            await ctx.send(f"❌ Ocurrió un error al generar los apuntes: {e}")
 
 bot.run(TOKEN)
