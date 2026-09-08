@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import datetime
+import re
 import aiohttp
 import discord
 from discord.ext import commands, tasks
@@ -113,12 +114,50 @@ El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre 
 ESTRUCTURA Y REGLAS DE FORMATO:
 Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
 Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
-Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX, explicando el significado y las unidades de cada variable.
+Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, escribe las fórmulas en texto claro y legible de forma tradicional (evita el uso de código LaTeX con barras inclinadas o comillas).
 Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
 Resolución Paso a Paso (Modelos de Examen): Desarrolla al menos 2 ejercicios o casos prácticos representativos de examen explicados de principio a fin, detallando el razonamiento antes de poner cada paso del cálculo.
 Sección "Trampas de Examen": Añade un apartado especial señalando los errores típicos que cometen los alumnos en este tema y cómo evitarlos.
 Bloque de Active Recall (Autoevaluación): Finaliza con una lista de 5 a 8 preguntas tipo test o de desarrollo corto (con sus respuestas ocultas o al final) para que el estudiante evalúe su retención al terminar de leer.
 Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea."""
+
+# --- LIMPIADOR DE TEXTO Y FORMULAS PARA NOTION ---
+def _limpiar_texto_notion(texto):
+    """Transforma el formato LaTeX a texto legible normal y remueve asteriscos."""
+    # Convertir fracciones \frac{a}{b} -> (a / b)
+    texto = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1 / \2)', texto)
+    # Convertir raíces \sqrt[n]{x} o \sqrt{x}
+    texto = re.sub(r'\\sqrt\[([^}]+)\]\{([^}]+)\}', r'raíz_\1(\2)', texto)
+    texto = re.sub(r'\\sqrt\{([^}]+)\}', r'raíz(\1)', texto)
+    
+    # Reemplazar comandos LaTeX comunes por texto plano
+    reemplazos = {
+        r'\mathbb{R}': 'R',
+        r'\text{Dom}': 'Dom',
+        r'\text': '',
+        r'\ge': '>=',
+        r'\le': '<=',
+        r'\geq': '>=',
+        r'\leq': '<=',
+        r'\neq': '!=',
+        r'\setminus': ' / ',
+        r'\in': 'pertenece a',
+        r'\dots': '...',
+        r'\log': 'log',
+        r'\cdot': '·',
+        '{': '',
+        '}': ''
+    }
+    for orig, reemplazo in reemplazos.items():
+        texto = texto.replace(orig, reemplazo)
+        
+    # Eliminar los delimitadores de LaTeX ($ y $$)
+    texto = re.sub(r'\$\$(.*?)\$\$', r'\1', texto)
+    texto = re.sub(r'\$(.*?)\$', r'\1', texto)
+    
+    # Quitar los asteriscos de formato de Markdown (** y *)
+    texto = texto.replace("**", "").replace("*", "")
+    return texto.strip()
 
 # --- NOTION HELPERS OPTIMIZADOS ---
 def _cargar_ids_disco():
@@ -238,35 +277,39 @@ def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
         lineas = contenido_markdown.split("\n")
         
         for linea in lineas:
+            linea_limpia = _limpiar_texto_notion(linea)
+            if not linea_limpia:
+                continue
+
             if linea.startswith("# "):
                 bloques.append({
                     "object": "block",
                     "type": "heading_1",
-                    "heading_1": {"rich_text": [{"type": "text", "text": {"content": linea.replace("# ", "")[:2000]}}]}
+                    "heading_1": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
                 })
             elif linea.startswith("## "):
                 bloques.append({
                     "object": "block",
                     "type": "heading_2",
-                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": linea.replace("## ", "")[:2000]}}]}
+                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
                 })
             elif linea.startswith("### "):
                 bloques.append({
                     "object": "block",
                     "type": "heading_3",
-                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": linea.replace("### ", "")[:2000]}}]}
+                    "heading_3": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
                 })
-            elif linea.startswith("- "):
+            elif linea.startswith("- ") or linea.startswith("* "):
                 bloques.append({
                     "object": "block",
                     "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": linea.replace("- ", "")[:2000]}}]}
+                    "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
                 })
-            elif linea.strip() != "":
+            else:
                 bloques.append({
                     "object": "block",
                     "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": linea[:2000]}}]}
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": linea_limpia[:2000]}}]}
                 })
 
         for i in range(0, len(bloques), 100):
