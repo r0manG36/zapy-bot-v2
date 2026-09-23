@@ -138,9 +138,9 @@ Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del 
 
 # --- LECTURA DE NOTION Y SISTEMA DE RETROALIMENTACIÓN ---
 def _extraer_texto_de_bloques(block_list):
-  """Extrae iterativamente el texto Markdown guardado dentro de las páginas de Notion."""
-   lineas = []
-   for block in block_list:
+    """Extrae iterativamente el texto Markdown guardado dentro de las páginas de Notion."""
+    lineas = []
+    for block in block_list:
         b_type = block.get("type")
         if b_type in [
             "paragraph",
