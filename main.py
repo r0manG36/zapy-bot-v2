@@ -191,7 +191,16 @@ def _obtener_algoritmo_notion_sync(asignatura):
         return ""
 
     try:
-        pages = notion.databases.query(database_id=db_id).get("results", [])
+        if hasattr(notion.databases, "query"):
+            res = notion.databases.query(database_id=db_id)
+        elif hasattr(notion, "data_sources") and hasattr(
+            notion.data_sources, "query"
+        ):
+            res = notion.data_sources.query(database_id=db_id)
+        else:
+            res = notion.request(path=f"databases/{db_id}/query", method="POST")
+
+        pages = res.get("results", [])
         contenido_total = []
 
         for p in pages:
@@ -249,7 +258,16 @@ def _query_notion_sync():
     if not notion or not NOTION_DATABASE_ID:
         return None
     try:
-        return notion.databases.query(database_id=NOTION_DATABASE_ID)
+        if hasattr(notion.databases, "query"):
+            return notion.databases.query(database_id=NOTION_DATABASE_ID)
+        elif hasattr(notion, "data_sources") and hasattr(
+            notion.data_sources, "query"
+        ):
+            return notion.data_sources.query(database_id=NOTION_DATABASE_ID)
+        else:
+            return notion.request(
+                path=f"databases/{NOTION_DATABASE_ID}/query", method="POST"
+            )
     except Exception as e:
         print(f"Error en consulta a Notion: {e}")
         return None
