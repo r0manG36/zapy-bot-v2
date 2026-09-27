@@ -3,7 +3,6 @@ import datetime
 import json
 import os
 import re
-import aiohttp
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -22,7 +21,7 @@ CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 # --- MODELO DE GEMINI ---
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
-# --- MAPEO DE ASIGNATURAS A SUS IDs DE BASES DE DATOS EN NOTION ---
+# --- MAPEO DE ASIGNATURAS A SUS IDs DE NOTION ---
 NOTION_ASIGNATURAS_MAP = {
     "mates": os.getenv("NOTION_MATES_ID"),
     "matematicas": os.getenv("NOTION_MATES_ID"),
@@ -51,16 +50,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-PETICIONES_FILE = "peticiones_informe.json"
 NOTION_CACHE_FILE = "notion_ids.json"
 
-# --- MEMORIA RAM Y CACHÉ DE EVENTOS Y ALGORITMOS ---
+# --- MEMORIA RAM Y CACHÉ ---
 IDS_MEMORIA_RAM = set()
 NOTION_EVENTOS_CACHE = None
 NOTION_CACHE_TIMESTAMP = None
 CACHE_TTL_SEGUNDOS = 60
 
-# CACHÉ RAM PARA CONTENIDO DE LAS BASES DE DATOS DE ASIGNATURAS (1 HORA TTL)
 CACHE_ALGORITMOS_RAM = {}
 TTL_ALGORITMOS_SEGUNDOS = 3600
 
@@ -136,9 +133,28 @@ Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del 
 """
 
 
-# --- LECTURA DE NOTION Y SISTEMA DE RETROALIMENTACIÓN ---
+# --- PARSER DE PROPIEDADES DE NOTION ---
+def _extraer_titulo_pagina(properties):
+    for prop in ["Nombre", "Name", "Title", "Tarea", "Evento"]:
+        val = properties.get(prop)
+        if val and val.get("title") and len(val["title"]) > 0:
+            return val["title"][0].get("plain_text", "Sin título")
+    return "Sin título"
+
+
+def _extraer_fecha_pagina(properties):
+    for prop in ["Fecha", "Date", "Calendar", "Fecha examen"]:
+        val = properties.get(prop)
+        if val and val.get("date") and val["date"]:
+            inicio = val["date"].get("start", "")
+            fin = val["date"].get("end", "")
+            if fin:
+                return f"{inicio} -> {fin}"
+            return inicio
+    return "Sin fecha asignada"
+
+
 def _extraer_texto_de_bloques(block_list):
-    """Extrae iterativamente el texto Markdown guardado dentro de las páginas de Notion."""
     lineas = []
     for block in block_list:
         b_type = block.get("type")
@@ -170,7 +186,6 @@ def _extraer_texto_de_bloques(block_list):
 
 
 def _obtener_algoritmo_notion_sync(asignatura):
-    """Consulta la base de datos de la asignatura en Notion de forma síncrona."""
     db_id = NOTION_ASIGNATURAS_MAP.get(asignatura.lower())
     if not notion or not db_id:
         return ""
@@ -195,7 +210,6 @@ def _obtener_algoritmo_notion_sync(asignatura):
 
 
 async def obtener_algoritmo_asignatura(asignatura):
-    """Manejador con memoria RAM para recuperar guías y algoritmos de Notion en 0 ms."""
     global CACHE_ALGORITMOS_RAM
     clave = asignatura.lower()
     ahora = datetime.datetime.now().timestamp()
@@ -212,7 +226,7 @@ async def obtener_algoritmo_asignatura(asignatura):
     return contenido
 
 
-# --- NOTION HELPERS Y PARSER DE ESTRUCTURA ---
+# --- NOTION HELPERS ---
 def _cargar_ids_disco():
     if os.path.exists(NOTION_CACHE_FILE):
         try:
@@ -234,7 +248,11 @@ def _guardar_ids_disco(ids_set):
 def _query_notion_sync():
     if not notion or not NOTION_DATABASE_ID:
         return None
-    return notion.databases.query(database_id=NOTION_DATABASE_ID)
+    try:
+        return notion.databases.query(database_id=NOTION_DATABASE_ID)
+    except Exception as e:
+        print(f"Error en consulta a Notion: {e}")
+        return None
 
 
 async def obtener_eventos_notion(forzar_refresco=False):
@@ -252,10 +270,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
             return NOTION_EVENTOS_CACHE
 
     if not notion or not NOTION_DATABASE_ID:
-        return (
-            "No se ha configurado el Token o el ID de la base de datos de"
-            " Notion en el archivo .env."
-        )
+        return "No se ha configurado el Token o el ID de la base de datos de Notion en el archivo .env."
 
     try:
         response = await asyncio.to_thread(_query_notion_sync)
@@ -274,25 +289,8 @@ async def obtener_eventos_notion(forzar_refresco=False):
         eventos = []
         for page in results:
             properties = page.get("properties", {})
-            title_prop = (
-                properties.get("Nombre")
-                or properties.get("Name")
-                or properties.get("Title")
-                or properties.get("Tarea")
-            )
-            nombre = "Sin título"
-            if (
-                title_prop
-                and title_prop.get("title")
-                and len(title_prop["title"]) > 0
-            ):
-                nombre = title_prop["title"][0].get("plain_text", "Sin título")
-
-            date_prop = properties.get("Fecha") or properties.get("Date")
-            fecha_str = "Sin fecha asignada"
-            if date_prop and date_prop.get("date") and date_prop["date"]:
-                fecha_str = date_prop["date"].get("start", "Sin fecha")
-
+            nombre = _extraer_titulo_pagina(properties)
+            fecha_str = _extraer_fecha_pagina(properties)
             eventos.append(f"- {nombre} ({fecha_str})")
 
         res_texto = "\n".join(eventos)
@@ -365,7 +363,6 @@ def _convertir_linea_a_bloque_notion(linea):
                 ]
             },
         }
-
     elif linea.startswith("- ") or linea.startswith("* "):
         return {
             "object": "block",
@@ -376,7 +373,6 @@ def _convertir_linea_a_bloque_notion(linea):
                 ]
             },
         }
-
     else:
         return {
             "object": "block",
@@ -453,26 +449,8 @@ async def comprobar_nuevos_eventos():
             page_id = page["id"]
             if page_id not in IDS_MEMORIA_RAM:
                 properties = page.get("properties", {})
-                title_prop = (
-                    properties.get("Nombre")
-                    or properties.get("Name")
-                    or properties.get("Title")
-                    or properties.get("Tarea")
-                )
-                nombre = "Sin título"
-                if (
-                    title_prop
-                    and title_prop.get("title")
-                    and len(title_prop["title"]) > 0
-                ):
-                    nombre = title_prop["title"][0].get(
-                        "plain_text", "Sin título"
-                    )
-
-                date_prop = properties.get("Fecha") or properties.get("Date")
-                fecha_str = "Sin fecha asignada"
-                if date_prop and date_prop.get("date") and date_prop["date"]:
-                    fecha_str = date_prop["date"].get("start", "Sin fecha")
+                nombre = _extraer_titulo_pagina(properties)
+                fecha_str = _extraer_fecha_pagina(properties)
 
                 embed = discord.Embed(
                     title="🆕 Nuevo evento en Notion",
@@ -502,113 +480,10 @@ async def antes_de_comprobar():
     await bot.wait_until_ready()
 
 
-def cargar_peticiones():
-    if os.path.exists(PETICIONES_FILE):
-        try:
-            with open(PETICIONES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-
-def guardar_peticiones(peticiones):
-    try:
-        with open(PETICIONES_FILE, "w", encoding="utf-8") as f:
-            json.dump(peticiones, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"Error al guardar peticiones: {e}")
-
-
-def limpiar_peticiones():
-    if os.path.exists(PETICIONES_FILE):
-        try:
-            os.remove(PETICIONES_FILE)
-        except Exception:
-            pass
-
-
 async def enviar_mensaje_largo(destino, texto):
     limite = 1900
     for i in range(0, len(texto), limite):
         await destino.send(texto[i : i + limite])
-
-
-async def obtener_tiempo():
-    url = (
-        "https://wttr.in/Vitoria-Gasteiz?format=%C+%t+(Min/Max:"
-        " +%f)+Lluvia:+%p&M"
-    )
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5)
-        ) as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.text()
-                    return data.strip()
-    except Exception:
-        pass
-    return "No se pudo obtener la previsión del tiempo."
-
-
-async def generar_embed_informe():
-    tiempo_info = await obtener_tiempo()
-    peticiones_vars = cargar_peticiones()
-    eventos_notion = await obtener_eventos_notion()
-    ahora = datetime.datetime.now()
-
-    embed = discord.Embed(
-        title="🌤️ Resumen Diario - Zapy",
-        description=(
-            f"Informe correspondiente al {ahora.strftime('%d/%m/%Y - %H:%M')}:"
-        ),
-        color=discord.Color.gold(),
-    )
-    embed.add_field(
-        name="🌤️ Tiempo en Vitoria-Gasteiz",
-        value=f"`{tiempo_info}`",
-        inline=False,
-    )
-    embed.add_field(
-        name="📅 Exámenes y Tareas Pendientes (Notion)",
-        value=f"```{eventos_notion}```",
-        inline=False,
-    )
-    embed.add_field(
-        name="⚽ Información Deportiva",
-        value=(
-            "• Consulta los marcadores recientes y próximos partidos de tu"
-            " jornada."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="📰 Noticias destacadas",
-        value=(
-            "• Novedades de Inteligencia Artificial y Videojuegos en"
-            " [3DJuegos](https://www.3djuegos.com) o"
-            " [Xataka](https://www.xataka.com)."
-        ),
-        inline=False,
-    )
-
-    if peticiones_vars:
-        texto_vars = "\n".join([f"• {p}" for p in peticiones_vars])
-        embed.add_field(
-            name="📌 Peticiones y Notas Guardadas",
-            value=texto_vars,
-            inline=False,
-        )
-        limpiar_peticiones()
-    else:
-        embed.add_field(
-            name="📌 Peticiones Guardadas",
-            value="*Sin peticiones variables para hoy.*",
-            inline=False,
-        )
-
-    return embed
 
 
 @bot.event
@@ -696,16 +571,6 @@ async def mostrar_comandos(ctx):
         inline=False,
     )
     embed.add_field(
-        name="📰 Informe Diario",
-        value="`!informe` - Genera y envía el resumen diario.",
-        inline=False,
-    )
-    embed.add_field(
-        name="📝 Peticiones",
-        value="`!peticion <texto>` - Añade una nota al próximo informe.",
-        inline=False,
-    )
-    embed.add_field(
         name="📅 Notion",
         value=(
             "`!eventos` - Muestra los exámenes y tareas guardados en Notion."
@@ -738,20 +603,6 @@ async def limpiar_mensajes(ctx, cantidad: int = None):
         )
     except Exception as e:
         await ctx.send(f"❌ Error al borrar mensajes: {e}", delete_after=5)
-
-
-@bot.command(name="informe")
-async def enviar_informe(ctx):
-    embed = await generar_embed_informe()
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="peticion")
-async def agregar_peticion(ctx, *, texto: str):
-    peticiones = cargar_peticiones()
-    peticiones.append(texto)
-    guardar_peticiones(peticiones)
-    await ctx.send(f"✅ Petición guardada: *{texto}*")
 
 
 @bot.command(name="eventos")
@@ -796,7 +647,6 @@ async def generar_apuntes_completos(ctx, *, args: str):
 
     async with ctx.typing():
         try:
-            # Recuperar algoritmos/documentos guardados previamente en Notion
             algoritmo_referencia = await obtener_algoritmo_asignatura(
                 asignatura
             )
