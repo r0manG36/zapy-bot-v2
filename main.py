@@ -18,10 +18,8 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 CANAL_NOTIFICACIONES_ID = os.getenv("CANAL_NOTIFICACIONES_ID")
 
-# --- MODELO DE GEMINI ---
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
-# --- MAPEO DE ASIGNATURAS A SUS IDs DE NOTION ---
 NOTION_ASIGNATURAS_MAP = {
     "mates": os.getenv("NOTION_MATES_ID"),
     "matematicas": os.getenv("NOTION_MATES_ID"),
@@ -52,7 +50,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 NOTION_CACHE_FILE = "notion_ids.json"
 
-# --- MEMORIA RAM Y CACHÉ ---
 IDS_MEMORIA_RAM = set()
 NOTION_EVENTOS_CACHE = None
 NOTION_CACHE_TIMESTAMP = None
@@ -61,54 +58,19 @@ CACHE_TTL_SEGUNDOS = 60
 CACHE_ALGORITMOS_RAM = {}
 TTL_ALGORITMOS_SEGUNDOS = 3600
 
-# --- PROMPTS DE SISTEMA ---
-SYSTEM_PROMPT = """Zapy, a partir de ahora vas a ser un tutor academico experto en todas las areas academicas con los mejores metodos de estudio basados en la ciencia y en opiniones de expertos en el tema. Tambien vas a ser un experto en la organizacion de bloques de estudio y rutinas en general, tambien los metodos que usaras seran basadas en la ciencia y en opiniones de expertos. Tienes que hacer que las respuestas no sean muy largas dandome todo el contexto todo el rato, pon solo lo necesario y si te pido contexto me lo das sino, no.
+SYSTEM_PROMPT_BASE = """Zapy, eres un tutor académico experto en métodos de estudio eficientes y optimización del tiempo para 4º ESO.
+Responde de forma concisa y directa sin rodeos introductorios.
 
-Actualmente, estoy en cuarto del eso cientifico con la siguientes asignaturas: Euskera, Lengua Castellana, Ingles, Geografia e Historia, Educacion Fisica, Tutoria, Matematicas academicas, Fisica y Quimica, Tecnologia, Digitalizacion y Robotica. Todas las asignaturas se explican, se hacen los deberes, proyectos y examenes en Euskera menos Ingles y Lengua Castellana.
+Rutina Semanal Base:
+- Lunes a Viernes: Clases 8:15 - 14:15.
+- Lunes/Miércoles: Entreno 17:30 - 20:30.
+- Martes: Familia/Cena 20:00 - 21:30.
+- Jueves: Entreno 19:30 - 21:45.
+- Viernes tarde: Sin estudio.
+- Sábado: Partido por la mañana/mediodía (libre desde las 16:00).
+- Domingo: Ocupado 13:00 - 16:00.
 
-Mi objetivos son tener una rutina muy bien estructurada para un estudio muy bueno y con la menor cantidad de horas de estudio gracias a los mejores metodos de estudio. Asi que necesito una rutina para cada dia o semana o periodo acorde a mis necesidades. Todo esto para sacar la maxima nota en cada asignatura.
-
-Esta es mi rutina semanal con todos los horarios exactos, mis impedimentos, mis preferencias, mis huecos libres…:
-
-Lunes 
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20:30 entrenar, 20:30 - 21:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Martes
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 20:00 - 21:30 Estar con Familia y Cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Miercoles
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 17:30 - 20:30 entrenar, 20:30 - 21:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Jueves
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, 19:30 - 21:45 entrenar, 22:00 - 22:30 volver a casa y cenar
-- Hora de cierre / descanso nocturno: Depende de que tareas me queden, (Siempre priorizar 8-9 horas de sueño)
-
-Viernes
-- Hora de despertar / inicio del día: 7:10
-- Trabajo / Clases / Compromisos fijos: 8:15 - 14:15
-- Comida / Descanso fijo: Ejemplo: 14:30 a 15:30
-- Otros bloqueos (ej. gimnasio, traslados): 16:20 - 16:45 Buscar a mi hermana, las tardes del viernes no estudio
-- Hora de cierre / descanso nocturno: Nunca se sabe, pero tarde
-
-Sabado: Los sabados a la mañana/mediodia hay partido y no suelo estar hasta las 16:00
-Domingo: Entre las 13:00 y 16:00 no puedo.
-
-Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo: A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00"""
+Genera la planificación considerando la FECHA ACTUAL Y EL DÍA DE LA SEMANA indicados en la petición para sugerir bloques concretos en función de los exámenes próximos."""
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
 El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
@@ -130,41 +92,42 @@ Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o ló
 Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
 
 Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea.
-"""
 
+Para fórmulas sencillas o variables dentro del texto plano, mantén las ecuaciones inline entre signos de dólar ($) con formato LaTeX estricto, sin añadir espacios ni símbolos extraños, para que la integración las convierta directamente en ecuaciones nativas visuales."""
 
-# --- PARSER DE PROPIEDADES DE NOTION ---
+def _query_notion_database_raw(database_id):
+    if not notion or not database_id:
+        return None
+    try:
+        return notion.request(path=f"databases/{database_id}/query", method="POST")
+    except Exception as e:
+        print(f"Error raw query Notion ({database_id}): {e}")
+        return None
+
 def _extraer_titulo_pagina(properties):
-    for prop in ["Nombre", "Name", "Title", "Tarea", "Evento"]:
-        val = properties.get(prop)
-        if val and val.get("title") and len(val["title"]) > 0:
-            return val["title"][0].get("plain_text", "Sin título")
+    for key, val in properties.items():
+        p_type = val.get("type")
+        if p_type == "title" and val.get("title"):
+            texto = "".join([t.get("plain_text", "") for t in val["title"]])
+            if texto:
+                return texto
     return "Sin título"
 
-
 def _extraer_fecha_pagina(properties):
-    for prop in ["Fecha", "Date", "Calendar", "Fecha examen"]:
-        val = properties.get(prop)
-        if val and val.get("date") and val["date"]:
-            inicio = val["date"].get("start", "")
-            fin = val["date"].get("end", "")
-            if fin:
-                return f"{inicio} -> {fin}"
-            return inicio
-    return "Sin fecha asignada"
-
+    for key, val in properties.items():
+        p_type = val.get("type")
+        if p_type == "date" and val.get("date"):
+            d = val["date"]
+            inicio = d.get("start", "")
+            fin = d.get("end", "")
+            return f"{inicio} -> {fin}" if fin else inicio
+    return "Sin fecha"
 
 def _extraer_texto_de_bloques(block_list):
     lineas = []
     for block in block_list:
         b_type = block.get("type")
-        if b_type in [
-            "paragraph",
-            "heading_1",
-            "heading_2",
-            "heading_3",
-            "bulleted_list_item",
-        ]:
+        if b_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
             rich = block.get(b_type, {}).get("rich_text", [])
             texto = "".join([t.get("plain_text", "") for t in rich])
             if texto:
@@ -184,141 +147,90 @@ def _extraer_texto_de_bloques(block_list):
                 lineas.append(f"$${expr}$$")
     return "\n".join(lineas)
 
-
 def _obtener_algoritmo_notion_sync(asignatura):
     db_id = NOTION_ASIGNATURAS_MAP.get(asignatura.lower())
     if not notion or not db_id:
         return ""
-
     try:
-        if hasattr(notion.databases, "query"):
-            res = notion.databases.query(database_id=db_id)
-        elif hasattr(notion, "data_sources") and hasattr(
-            notion.data_sources, "query"
-        ):
-            res = notion.data_sources.query(database_id=db_id)
-        else:
-            res = notion.request(path=f"databases/{db_id}/query", method="POST")
-
+        res = _query_notion_database_raw(db_id)
+        if not res:
+            return ""
         pages = res.get("results", [])
         contenido_total = []
-
         for p in pages:
             page_id = p["id"]
-            blocks = notion.blocks.children.list(block_id=page_id).get(
-                "results", []
-            )
+            blocks = notion.blocks.children.list(block_id=page_id).get("results", [])
             texto_pagina = _extraer_texto_de_bloques(blocks)
             if texto_pagina:
                 contenido_total.append(texto_pagina)
-
         return "\n\n---\n\n".join(contenido_total)
     except Exception as e:
-        print(f"Error al leer base de datos de Notion ({asignatura}): {e}")
+        print(f"Error algoritmo Notion ({asignatura}): {e}")
         return ""
-
 
 async def obtener_algoritmo_asignatura(asignatura):
     global CACHE_ALGORITMOS_RAM
     clave = asignatura.lower()
     ahora = datetime.datetime.now().timestamp()
-
     if clave in CACHE_ALGORITMOS_RAM:
         data, ts = CACHE_ALGORITMOS_RAM[clave]
         if ahora - ts < TTL_ALGORITMOS_SEGUNDOS:
             return data
-
-    contenido = await asyncio.to_thread(
-        _obtener_algoritmo_notion_sync, asignatura
-    )
+    contenido = await asyncio.to_thread(_obtener_algoritmo_notion_sync, asignatura)
     CACHE_ALGORITMOS_RAM[clave] = (contenido, ahora)
     return contenido
 
-
-# --- NOTION HELPERS ---
 def _cargar_ids_disco():
     if os.path.exists(NOTION_CACHE_FILE):
         try:
             with open(NOTION_CACHE_FILE, "r", encoding="utf-8") as f:
                 return set(json.load(f))
         except Exception as e:
-            print(f"Error al leer caché de disco: {e}")
+            print(f"Error leyendo caché disco: {e}")
     return set()
-
 
 def _guardar_ids_disco(ids_set):
     try:
         with open(NOTION_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(list(ids_set), f, ensure_ascii=False, indent=4)
     except Exception as e:
-        print(f"Error al guardar caché de disco: {e}")
-
-
-def _query_notion_sync():
-    if not notion or not NOTION_DATABASE_ID:
-        return None
-    try:
-        if hasattr(notion.databases, "query"):
-            return notion.databases.query(database_id=NOTION_DATABASE_ID)
-        elif hasattr(notion, "data_sources") and hasattr(
-            notion.data_sources, "query"
-        ):
-            return notion.data_sources.query(database_id=NOTION_DATABASE_ID)
-        else:
-            return notion.request(
-                path=f"databases/{NOTION_DATABASE_ID}/query", method="POST"
-            )
-    except Exception as e:
-        print(f"Error en consulta a Notion: {e}")
-        return None
-
+        print(f"Error guardando caché disco: {e}")
 
 async def obtener_eventos_notion(forzar_refresco=False):
     global NOTION_EVENTOS_CACHE, NOTION_CACHE_TIMESTAMP
-
     ahora = datetime.datetime.now()
-    if (
-        not forzar_refresco
-        and NOTION_EVENTOS_CACHE is not None
-        and NOTION_CACHE_TIMESTAMP
-    ):
-        if (
-            ahora - NOTION_CACHE_TIMESTAMP
-        ).total_seconds() < CACHE_TTL_SEGUNDOS:
+    if not forzar_refresco and NOTION_EVENTOS_CACHE is not None and NOTION_CACHE_TIMESTAMP:
+        if (ahora - NOTION_CACHE_TIMESTAMP).total_seconds() < CACHE_TTL_SEGUNDOS:
             return NOTION_EVENTOS_CACHE
 
     if not notion or not NOTION_DATABASE_ID:
-        return "No se ha configurado el Token o el ID de la base de datos de Notion en el archivo .env."
+        return "Notion no está configurado correctamente en el .env"
 
     try:
-        response = await asyncio.to_thread(_query_notion_sync)
+        response = await asyncio.to_thread(_query_notion_database_raw, NOTION_DATABASE_ID)
         if not response:
-            return "Error al conectar con la base de datos de Notion."
+            return "No se pudo consultar la base de datos de Notion."
 
         results = response.get("results", [])
         if not results:
-            res_texto = (
-                "No hay eventos ni exámenes registrados actualmente en Notion."
-            )
+            res_texto = "No hay exámenes o eventos agendados."
             NOTION_EVENTOS_CACHE = res_texto
             NOTION_CACHE_TIMESTAMP = ahora
             return res_texto
 
         eventos = []
         for page in results:
-            properties = page.get("properties", {})
-            nombre = _extraer_titulo_pagina(properties)
-            fecha_str = _extraer_fecha_pagina(properties)
-            eventos.append(f"- {nombre} ({fecha_str})")
+            props = page.get("properties", {})
+            nombre = _extraer_titulo_pagina(props)
+            fecha = _extraer_fecha_pagina(props)
+            eventos.append(f"- {nombre} ({fecha})")
 
         res_texto = "\n".join(eventos)
         NOTION_EVENTOS_CACHE = res_texto
         NOTION_CACHE_TIMESTAMP = ahora
         return res_texto
-
-    except Exception as err:
-        return f"Error al consultar Notion: {err}"
-
+    except Exception as e:
+        return f"Error en Notion: {e}"
 
 def _crear_tarea_notion_sync(nombre, fecha_str):
     if not notion or not NOTION_DATABASE_ID:
@@ -330,157 +242,120 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         }
         if fecha_str:
             nueva_pagina["properties"]["Fecha"] = {"date": {"start": fecha_str}}
-
         notion.pages.create(**nueva_pagina)
         return True
     except Exception as e:
-        print(f"Error al crear tarea en Notion: {e}")
+        print(f"Error creando tarea Notion: {e}")
         return False
 
+def _limpiar_texto_markdown(texto):
+    texto = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', texto)
+    return texto.replace('\r\n', '\n')
 
 def _convertir_linea_a_bloque_notion(linea):
-    linea = linea.strip()
+    linea = _limpiar_texto_markdown(linea.strip())
     if not linea:
         return None
 
+    # Bloque completo de ecuación $$...$$
     if linea.startswith("$$") and linea.endswith("$$"):
         expr = linea[2:-2].strip()
-        return {
-            "object": "block",
-            "type": "equation",
-            "equation": {"expression": expr},
-        }
+        return {"object": "block", "type": "equation", "equation": {"expression": expr[:1000]}}
+
+    # Tipos de encabezados o viñetas
+    b_type = "paragraph"
+    prefijo_len = 0
 
     if linea.startswith("# "):
-        return {
-            "object": "block",
-            "type": "heading_1",
-            "heading_1": {
-                "rich_text": [
-                    {"type": "text", "text": {"content": linea[2:].strip()[:2000]}}
-                ]
-            },
-        }
+        b_type = "heading_1"
+        prefijo_len = 2
     elif linea.startswith("## "):
-        return {
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [
-                    {"type": "text", "text": {"content": linea[3:].strip()[:2000]}}
-                ]
-            },
-        }
+        b_type = "heading_2"
+        prefijo_len = 3
     elif linea.startswith("### "):
-        return {
-            "object": "block",
-            "type": "heading_3",
-            "heading_3": {
-                "rich_text": [
-                    {"type": "text", "text": {"content": linea[4:].strip()[:2000]}}
-                ]
-            },
-        }
+        b_type = "heading_3"
+        prefijo_len = 4
     elif linea.startswith("- ") or linea.startswith("* "):
-        return {
-            "object": "block",
-            "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [
-                    {"type": "text", "text": {"content": linea[2:].strip()[:2000]}}
-                ]
-            },
-        }
-    else:
-        return {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": linea[:2000]}}]
-            },
-        }
+        b_type = "bulleted_list_item"
+        prefijo_len = 2
 
+    texto_contenido = linea[prefijo_len:].strip()
+
+    # Procesado de rich_text reconociendo ecuaciones inline ($...$)
+    rich_text = []
+    partes = re.split(r'(\$.*?\$)', texto_contenido)
+
+    for parte in partes:
+        if not parte:
+            continue
+        if parte.startswith("$") and parte.endswith("$") and len(parte) > 2:
+            expr = parte[1:-1].strip()
+            rich_text.append({"type": "equation", "equation": {"expression": expr[:1000]}})
+        else:
+            rich_text.append({"type": "text", "text": {"content": parte[:2000]}})
+
+    if not rich_text:
+        return None
+
+    return {"object": "block", "type": b_type, b_type: {"rich_text": rich_text}}
 
 def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
-    db_target = (
-        NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
-    )
+    db_target = NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
     if not notion or not db_target:
         return False
     try:
         nueva_pagina = notion.pages.create(
             parent={"database_id": db_target},
-            properties={
-                "Nombre": {
-                    "title": [{"text": {"content": f"Masterclass: {tema}"}}]
-                }
-            },
+            properties={"Nombre": {"title": [{"text": {"content": f"Masterclass: {tema}"}}]}},
         )
         page_id = nueva_pagina["id"]
-
         bloques = []
-        lineas = contenido_markdown.split("\n")
-
-        for linea in lineas:
-            bloque = _convertir_linea_a_bloque_notion(linea)
-            if bloque:
-                bloques.append(bloque)
-
+        for linea in contenido_markdown.split("\n"):
+            b = _convertir_linea_a_bloque_notion(linea)
+            if b:
+                bloques.append(b)
         for i in range(0, len(bloques), 100):
-            notion.blocks.children.append(
-                block_id=page_id, children=bloques[i : i + 100]
-            )
-
+            notion.blocks.children.append(block_id=page_id, children=bloques[i:i + 100])
         return True
     except Exception as e:
-        print(f"Error al crear apuntes completos en Notion: {e}")
+        print(f"Error creando apunte Notion: {e}")
         return False
 
-
-# --- TAREA AUTOMÁTICA EN SEGUNDO PLANO ---
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
     global IDS_MEMORIA_RAM
-
     if not notion or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
         return
-
     try:
         canal = bot.get_channel(int(CANAL_NOTIFICACIONES_ID))
         if not canal:
             return
 
-        response = await asyncio.to_thread(_query_notion_sync)
+        response = await asyncio.to_thread(_query_notion_database_raw, NOTION_DATABASE_ID)
         if not response:
             return
 
         results = response.get("results", [])
-
         if not IDS_MEMORIA_RAM and results:
             IDS_MEMORIA_RAM = {page["id"] for page in results}
             await asyncio.to_thread(_guardar_ids_disco, IDS_MEMORIA_RAM)
             return
 
         nuevos_ids = set()
-
         for page in results:
             page_id = page["id"]
             if page_id not in IDS_MEMORIA_RAM:
-                properties = page.get("properties", {})
-                nombre = _extraer_titulo_pagina(properties)
-                fecha_str = _extraer_fecha_pagina(properties)
+                props = page.get("properties", {})
+                nombre = _extraer_titulo_pagina(props)
+                fecha = _extraer_fecha_pagina(props)
 
                 embed = discord.Embed(
                     title="🆕 Nuevo evento en Notion",
-                    description=(
-                        "Se ha añadido un nuevo evento o examen a tu"
-                        " planificación."
-                    ),
+                    description="Se ha detectado una nueva entrada en tu calendario.",
                     color=discord.Color.green(),
                 )
                 embed.add_field(name="📌 Evento", value=nombre, inline=False)
-                embed.add_field(name="📅 Fecha", value=fecha_str, inline=False)
-
+                embed.add_field(name="📅 Fecha", value=fecha, inline=False)
                 await canal.send(embed=embed)
                 nuevos_ids.add(page_id)
 
@@ -488,33 +363,25 @@ async def comprobar_nuevos_eventos():
             IDS_MEMORIA_RAM.update(nuevos_ids)
             await asyncio.to_thread(_guardar_ids_disco, IDS_MEMORIA_RAM)
             await obtener_eventos_notion(forzar_refresco=True)
-
     except Exception as e:
-        print(f"Excepción aislada en bucle Notion: {e}")
-
+        print(f"Excepción bucle Notion: {e}")
 
 @comprobar_nuevos_eventos.before_loop
 async def antes_de_comprobar():
     await bot.wait_until_ready()
 
-
 async def enviar_mensaje_largo(destino, texto):
     limite = 1900
     for i in range(0, len(texto), limite):
-        await destino.send(texto[i : i + limite])
-
+        await destino.send(texto[i:i + limite])
 
 @bot.event
 async def on_ready():
     global IDS_MEMORIA_RAM
     IDS_MEMORIA_RAM = await asyncio.to_thread(_cargar_ids_disco)
-    print(
-        f"Zapy optimizado y conectado como {bot.user} (IDs cargados en RAM:"
-        f" {len(IDS_MEMORIA_RAM)})."
-    )
+    print(f"Zapy activo como {bot.user} (IDs en RAM: {len(IDS_MEMORIA_RAM)})")
     if not comprobar_nuevos_eventos.is_running():
         comprobar_nuevos_eventos.start()
-
 
 @bot.event
 async def on_message(message):
@@ -528,32 +395,32 @@ async def on_message(message):
 
         if es_hilo or es_mencion or es_dm:
             if client_gemini:
-                texto_limpio = (
-                    message.content.replace(f"<@{bot.user.id}>", "").strip()
-                )
-
+                texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
                 destino = message.channel
                 if not es_hilo and not es_dm:
                     try:
-                        destino = await message.create_thread(
-                            name=f"Planificación - {message.author.display_name}"
-                        )
-                    except Exception as err_hilo:
-                        print(f"No se pudo crear el hilo: {err_hilo}")
+                        destino = await message.create_thread(name=f"Planificación - {message.author.display_name}")
+                    except Exception as e:
                         destino = message.channel
 
                 try:
                     async with destino.typing():
                         eventos_notion = await obtener_eventos_notion()
+                        ahora = datetime.datetime.now()
+                        dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+                        dia_hoy = dias_semana[ahora.weekday()]
+                        fecha_hoy_str = ahora.strftime("%Y-%m-%d %H:%M")
+
                         prompt_completo = (
-                            f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\nPETICIÓN"
-                            f" DEL ALUMNO:\n{texto_limpio}"
+                            f"FECHA ACTUAL: {dia_hoy}, {fecha_hoy_str}\n\n"
+                            f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos_notion}\n\n"
+                            f"PETICIÓN DEL ALUMNO:\n{texto_limpio}"
                         )
 
                         config = types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT,
+                            system_instruction=SYSTEM_PROMPT_BASE,
                             temperature=0.3,
-                            max_output_tokens=300,
+                            max_output_tokens=400,
                         )
 
                         response = await asyncio.to_thread(
@@ -564,70 +431,33 @@ async def on_message(message):
                         )
                         await enviar_mensaje_largo(destino, response.text)
                 except Exception as e:
-                    print(f"Error de ejecución en Gemini: {e}")
-                    await destino.send(f"❌ Ocurrió un error al responder: {e}")
+                    await destino.send(f"❌ Error al responder: {e}")
             else:
-                await message.channel.send(
-                    "⚠️ La API de Gemini no está configurada correctamente."
-                )
+                await message.channel.send("⚠️ API de Gemini no configurada.")
 
     await bot.process_commands(message)
 
-
-# --- COMANDOS ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
-    embed = discord.Embed(
-        title="🤖 Panel de Comandos de Zapy", color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="📌 General", value="`!comandos` - Muestra esta ayuda.", inline=False
-    )
-    embed.add_field(
-        name="🧹 Limpieza",
-        value="`!clear [cantidad]` - Borra mensajes del canal o hilo.",
-        inline=False,
-    )
-    embed.add_field(
-        name="📅 Notion",
-        value=(
-            "`!eventos` - Muestra los exámenes y tareas guardados en Notion."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="➕ Añadir Tarea",
-        value="`!añadir <nombre> | <AAAA-MM-DD>` - Crea una tarea en Notion.",
-        inline=False,
-    )
-    embed.add_field(
-        name="🚀 Generar Masterclass",
-        value=(
-            "`!apuntes <Asignatura> | <Tema>` - Crea apuntes hiperdetallados"
-            " apoyados en tu Base de Conocimiento de Notion."
-        ),
-        inline=False,
-    )
+    embed = discord.Embed(title="🤖 Comandos de Zapy", color=discord.Color.blue())
+    embed.add_field(name="📅 Notion", value="`!eventos` - Lista exámenes/tareas.", inline=False)
+    embed.add_field(name="➕ Añadir", value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.", inline=False)
+    embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Genera apuntes.", inline=False)
+    embed.add_field(name="🧹 Limpiar", value="`!clear [n]` - Borra mensajes.", inline=False)
     await ctx.send(embed=embed)
 
-
 @bot.command(name="clear")
-async def limpiar_mensajes(ctx, cantidad: int = None):
-    limite = cantidad if cantidad is not None else 100
+async def limpiar_mensajes(ctx, cantidad: int = 100):
     try:
-        deleted = await ctx.channel.purge(limit=limite)
-        await ctx.send(
-            f"🧹 Se han borrado {len(deleted)} mensajes.", delete_after=3
-        )
+        deleted = await ctx.channel.purge(limit=cantidad)
+        await ctx.send(f"🧹 {len(deleted)} mensajes borrados.", delete_after=3)
     except Exception as e:
-        await ctx.send(f"❌ Error al borrar mensajes: {e}", delete_after=5)
-
+        await ctx.send(f"❌ Error: {e}", delete_after=5)
 
 @bot.command(name="eventos")
 async def ver_eventos(ctx):
-    evs = await obtener_eventos_notion()
-    await ctx.send(f"📅 **Eventos y exámenes en tu Notion:**\n{evs}")
-
+    evs = await obtener_eventos_notion(forzar_refresco=True)
+    await ctx.send(f"📅 **Eventos en tu Calendar/Notion:**\n{evs}")
 
 @bot.command(name="añadir")
 async def añadir_tarea_notion(ctx, *, args: str):
@@ -642,44 +472,27 @@ async def añadir_tarea_notion(ctx, *, args: str):
     async with ctx.typing():
         exito = await asyncio.to_thread(_crear_tarea_notion_sync, nombre, fecha)
         if exito:
-            fecha_texto = f" para el `{fecha}`" if fecha else ""
-            await ctx.send(
-                f"✅ Tarea **{nombre}** añadida correctamente a tu"
-                f" Notion{fecha_texto}."
-            )
+            await obtener_eventos_notion(forzar_refresco=True)
+            await ctx.send(f"✅ Evento **{nombre}** creado en Notion.")
         else:
-            await ctx.send(
-                "❌ Hubo un error al conectar con Notion para crear la tarea."
-            )
-
+            await ctx.send("❌ Error al guardar en Notion.")
 
 @bot.command(name="apuntes")
 async def generar_apuntes_completos(ctx, *, args: str):
-    if "|" in args:
-        partes = args.split("|")
-        asignatura = partes[0].strip()
-        tema = partes[1].strip()
-    else:
-        await ctx.send("⚠️ Usa el formato: `!apuntes <Asignatura> | <Tema>`")
+    if "|" not in args:
+        await ctx.send("⚠️ Usa el formato: `!apuntes Asignatura | Tema`")
         return
+
+    partes = args.split("|")
+    asignatura = partes[0].strip()
+    tema = partes[1].strip()
 
     async with ctx.typing():
         try:
-            algoritmo_referencia = await obtener_algoritmo_asignatura(
-                asignatura
-            )
-
-            prompt_peticion = (
-                f"Elabora la Masterclass Completa sobre el tema '{tema}' de la"
-                f" asignatura de '{asignatura}'."
-            )
-            if algoritmo_referencia:
-                prompt_peticion += (
-                    f"\n\n--- BASE DE CONOCIMIENTO Y ALGORITMO OBLIGATORIO DE"
-                    " NOTION ---\nUsa las siguientes directrices, ejercicios"
-                    " base y estructuras obligatorias para generar esta"
-                    f" masterclass:\n{algoritmo_referencia}\n------------------------------------"
-                )
+            algoritmo = await obtener_algoritmo_asignatura(asignatura)
+            prompt = f"Elabora la Masterclass sobre '{tema}' de '{asignatura}'."
+            if algoritmo:
+                prompt += f"\n\n--- METODOLOGÍA Y ALGORITMO ---\n{algoritmo}"
 
             config = types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT_MASTERCLASS,
@@ -690,28 +503,16 @@ async def generar_apuntes_completos(ctx, *, args: str):
             response = await asyncio.to_thread(
                 client_gemini.models.generate_content,
                 model=GEMINI_MODEL,
-                contents=prompt_peticion,
+                contents=prompt,
                 config=config,
             )
 
-            exito = await asyncio.to_thread(
-                _crear_apunte_notion_completo, asignatura, tema, response.text
-            )
-
+            exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
             if exito:
-                await ctx.send(
-                    f"🚀 **Masterclass generada:** Se ha creado la página"
-                    f" completa de **{tema}** ({asignatura.capitalize()}) en tu"
-                    " Notion basándose en tu algoritmo de conocimiento."
-                )
+                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.")
             else:
-                await ctx.send(
-                    "❌ Hubo un error al exportar la masterclass a Notion."
-                )
-
+                await ctx.send("❌ Error al exportar a Notion.")
         except Exception as e:
-            print(f"Error en comando !apuntes: {e}")
-            await ctx.send(f"❌ Ocurrió un error al generar los apuntes: {e}")
-
+            await ctx.send(f"❌ Error al generar masterclass: {e}")
 
 bot.run(TOKEN)
