@@ -70,7 +70,7 @@ Rutina Semanal Base:
 - Sábado: Partido por la mañana/mediodía (libre desde las 16:00).
 - Domingo: Ocupado 13:00 - 16:00.
 
-Genera la planificación considerando la FECHA ACTUAL Y EL DÍA DE LA SEMANA indicados en la petición para sugerir bloques concretos en función de los exámenes próximos."""
+Genera la planificación evaluando en qué día y fecha concreta te encuentras hoy respecto a las fechas de los exámenes en Notion. Organiza únicamente los días venideros."""
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
 El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
@@ -96,16 +96,19 @@ Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del 
 Para fórmulas sencillas o variables dentro del texto plano, mantén las ecuaciones inline entre signos de dólar ($) con formato LaTeX estricto, sin añadir espacios ni símbolos extraños, para que la integración las convierta directamente en ecuaciones nativas visuales."""
 
 
-# --- MÓDULO CALENDARIO Y NOTION ---
+# --- MÓDULO CALENDARIO Y NOTION CORREGIDO ---
 def _query_notion_database_raw(database_id):
     if not notion or not database_id:
         return None
     try:
+        # Se elimina la barra inicial para evitar InvalidRequestURL
+        path_clean = f"databases/{database_id}/query".strip("/")
         return notion.request(
-            path=f"databases/{database_id}/query", method="POST"
+            path=path_clean,
+            method="POST"
         )
     except Exception as e:
-        print(f"Error raw query Notion ({database_id}): {e}")
+        print(f"Error query Notion ({database_id}): {e}")
         return None
 
 
@@ -157,7 +160,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
         if not response:
             return (
                 "❌ No se pudo conectar con la base de datos de Notion. Revisa"
-                " que la integración tenga permisos asignados en la página."
+                " los permisos de la integración."
             )
 
         results = response.get("results", [])
@@ -485,11 +488,11 @@ async def on_message(message):
                             "Domingo",
                         ]
                         dia_hoy = dias_semana[ahora.weekday()]
-                        fecha_hoy_str = ahora.strftime("%Y-%m-%d %H:%M")
+                        fecha_hoy_str = ahora.strftime("%d/%m/%Y")
 
                         prompt_completo = (
-                            f"FECHA ACTUAL: {dia_hoy}, {fecha_hoy_str}\n\n"
-                            f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos_notion}\n\n"
+                            f"HOY ES: {dia_hoy}, {fecha_hoy_str}\n\n"
+                            f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\n"
                             f"PETICIÓN DEL ALUMNO:\n{texto_limpio}"
                         )
 
