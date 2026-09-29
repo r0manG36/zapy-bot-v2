@@ -3,12 +3,13 @@ import datetime
 import json
 import os
 import re
+import urllib.request
+import urllib.error
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from notion_client import Client
 
 load_dotenv()
 
@@ -42,7 +43,6 @@ NOTION_ASIGNATURAS_MAP = {
 }
 
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
-notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -96,17 +96,29 @@ Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del 
 Para fórmulas sencillas o variables dentro del texto plano, mantén las ecuaciones inline entre signos de dólar ($) con formato LaTeX estricto, sin añadir espacios ni símbolos extraños, para que la integración las convierta directamente en ecuaciones nativas visuales."""
 
 
-# --- MÓDULO NOTION CORREGIDO (SDK NATIVO) ---
-def _query_notion_database_raw(database_id):
-    if not notion or not database_id:
+# --- CLIENTE HTTP DIRECTO PARA NOTION (SIN DEPENDENCIAS BUGGEADAS) ---
+def _http_notion_request(endpoint, method="POST", payload=None):
+    if not NOTION_TOKEN:
         return None
+    
+    url = f"https://api.notion.com/v1/{endpoint.strip('/')}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN.strip()}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    
+    data = json.dumps(payload).encode('utf-8') if payload else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    
     try:
-        # Uso nativo del método de la librería de Notion para evitar errores de URL
-        db_id_limpio = database_id.strip()
-        return notion.databases.query(database_id=db_id_limpio)
+        with urllib.request.urlopen(req) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode('utf-8'))
     except Exception as e:
-        print(f"❌ Error al consultar Notion (ID: {database_id}): {e}")
+        print(f"❌ Error HTTP Notion ({endpoint}): {e}")
         return None
+    return None
 
 
 def _extraer_titulo_pagina(properties):
@@ -139,32 +151,21 @@ async def obtener_eventos_notion(forzar_refresco=False):
         and NOTION_EVENTOS_CACHE is not None
         and NOTION_CACHE_TIMESTAMP
     ):
-        if (
-            ahora - NOTION_CACHE_TIMESTAMP
-        ).total_seconds() < CACHE_TTL_SEGUNDOS:
+        if (ahora - NOTION_CACHE_TIMESTAMP).total_seconds() < CACHE_TTL_SEGUNDOS:
             return NOTION_EVENTOS_CACHE
 
-    if not notion or not NOTION_DATABASE_ID:
-        return (
-            "❌ `NOTION_TOKEN` o `NOTION_DATABASE_ID` no están configurados en"
-            " el `.env`."
-        )
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
+        return "❌ `NOTION_TOKEN` o `NOTION_DATABASE_ID` no están configurados en el `.env`."
 
     try:
-        response = await asyncio.to_thread(
-            _query_notion_database_raw, NOTION_DATABASE_ID
-        )
+        endpoint = f"databases/{NOTION_DATABASE_ID.strip()}/query"
+        response = await asyncio.to_thread(_http_notion_request, endpoint, "POST")
         if not response:
-            return (
-                "❌ No se pudo conectar con la base de datos de Notion. Revisa"
-                " que la integración esté agregada como conexión."
-            )
+            return "❌ No se pudo conectar con Notion. Comprueba que el ID y el Token de Notion sean correctos."
 
         results = response.get("results", [])
         if not results:
-            res_texto = (
-                "📅 No hay eventos ni exámenes registrados actualmente en Notion."
-            )
+            res_texto = "📅 No hay eventos ni exámenes registrados actualmente en Notion."
             NOTION_EVENTOS_CACHE = res_texto
             NOTION_CACHE_TIMESTAMP = ahora
             return res_texto
@@ -186,7 +187,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
 
 
 def _crear_tarea_notion_sync(nombre, fecha_str):
-    if not notion or not NOTION_DATABASE_ID:
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID:
         return False
     try:
         nueva_pagina = {
@@ -195,8 +196,9 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         }
         if fecha_str:
             nueva_pagina["properties"]["Fecha"] = {"date": {"start": fecha_str}}
-        notion.pages.create(**nueva_pagina)
-        return True
+            
+        res = _http_notion_request("pages", "POST", nueva_pagina)
+        return res is not None
     except Exception as e:
         print(f"Error creando tarea Notion: {e}")
         return False
@@ -235,19 +237,18 @@ def _extraer_texto_de_bloques(block_list):
 
 def _obtener_algoritmo_notion_sync(asignatura):
     db_id = NOTION_ASIGNATURAS_MAP.get(asignatura.lower())
-    if not notion or not db_id:
+    if not db_id:
         return ""
     try:
-        res = _query_notion_database_raw(db_id)
+        res = _http_notion_request(f"databases/{db_id.strip()}/query", "POST")
         if not res:
             return ""
         pages = res.get("results", [])
         contenido_total = []
         for p in pages:
             page_id = p["id"]
-            blocks = notion.blocks.children.list(block_id=page_id).get(
-                "results", []
-            )
+            b_res = _http_notion_request(f"blocks/{page_id}/children", "GET")
+            blocks = b_res.get("results", []) if b_res else []
             texto_pagina = _extraer_texto_de_bloques(blocks)
             if texto_pagina:
                 contenido_total.append(texto_pagina)
@@ -265,9 +266,7 @@ async def obtener_algoritmo_asignatura(asignatura):
         data, ts = CACHE_ALGORITMOS_RAM[clave]
         if ahora - ts < TTL_ALGORITMOS_SEGUNDOS:
             return data
-    contenido = await asyncio.to_thread(
-        _obtener_algoritmo_notion_sync, asignatura
-    )
+    contenido = await asyncio.to_thread(_obtener_algoritmo_notion_sync, asignatura)
     CACHE_ALGORITMOS_RAM[clave] = (contenido, ahora)
     return contenido
 
@@ -347,30 +346,30 @@ def _convertir_linea_a_bloque_notion(linea):
 
 
 def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
-    db_target = (
-        NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
-    )
-    if not notion or not db_target:
+    db_target = NOTION_ASIGNATURAS_MAP.get(asignatura.lower()) or NOTION_DATABASE_ID
+    if not db_target:
         return False
     try:
-        nueva_pagina = notion.pages.create(
-            parent={"database_id": db_target.strip()},
-            properties={
+        nueva_pagina = {
+            "parent": {"database_id": db_target.strip()},
+            "properties": {
                 "Nombre": {
                     "title": [{"text": {"content": f"Masterclass: {tema}"}}]
                 }
             },
-        )
-        page_id = nueva_pagina["id"]
+        }
+        res_pag = _http_notion_request("pages", "POST", nueva_pagina)
+        if not res_pag:
+            return False
+            
+        page_id = res_pag["id"]
         bloques = []
         for linea in contenido_markdown.split("\n"):
             b = _convertir_linea_a_bloque_notion(linea)
             if b:
                 bloques.append(b)
         for i in range(0, len(bloques), 100):
-            notion.blocks.children.append(
-                block_id=page_id, children=bloques[i : i + 100]
-            )
+            _http_notion_request(f"blocks/{page_id}/children", "PATCH", {"children": bloques[i : i + 100]})
         return True
     except Exception as e:
         print(f"Error creando apunte Notion: {e}")
@@ -381,16 +380,15 @@ def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
 @tasks.loop(seconds=30)
 async def comprobar_nuevos_eventos():
     global IDS_MEMORIA_RAM
-    if not notion or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
+    if not NOTION_TOKEN or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
         return
     try:
         canal = bot.get_channel(int(CANAL_NOTIFICACIONES_ID))
         if not canal:
             return
 
-        response = await asyncio.to_thread(
-            _query_notion_database_raw, NOTION_DATABASE_ID
-        )
+        endpoint = f"databases/{NOTION_DATABASE_ID.strip()}/query"
+        response = await asyncio.to_thread(_http_notion_request, endpoint, "POST")
         if not response:
             return
 
@@ -410,9 +408,7 @@ async def comprobar_nuevos_eventos():
 
                 embed = discord.Embed(
                     title="🆕 Nuevo evento en Notion",
-                    description=(
-                        "Se ha detectado una nueva entrada en tu calendario."
-                    ),
+                    description="Se ha detectado una nueva entrada en tu calendario.",
                     color=discord.Color.green(),
                 )
                 embed.add_field(name="📌 Evento", value=nombre, inline=False)
@@ -463,9 +459,7 @@ async def on_message(message):
                 await message.channel.send("⚠️ API de Gemini no configurada.")
                 return
 
-            texto_limpio = (
-                message.content.replace(f"<@{bot.user.id}>", "").strip()
-            )
+            texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
             destino = message.channel
             if not es_hilo and not es_dm:
                 try:
@@ -512,9 +506,7 @@ async def on_message(message):
                     await enviar_mensaje_largo(destino, response.text)
             except Exception as e:
                 print(f"Error Gemini: {e}")
-                await destino.send(
-                    f"❌ Ocurrió un error al procesar con la IA: {e}"
-                )
+                await destino.send(f"❌ Ocurrió un error al procesar con la IA: {e}")
 
     await bot.process_commands(message)
 
@@ -522,29 +514,11 @@ async def on_message(message):
 # --- COMANDOS ---
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx):
-    embed = discord.Embed(
-        title="🤖 Comandos de Zapy", color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="📅 Notion",
-        value="`!eventos` - Lista exámenes/tareas.",
-        inline=False,
-    )
-    embed.add_field(
-        name="➕ Añadir",
-        value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.",
-        inline=False,
-    )
-    embed.add_field(
-        name="🚀 Masterclass",
-        value="`!apuntes Asignatura | Tema` - Genera apuntes.",
-        inline=False,
-    )
-    embed.add_field(
-        name="🧹 Limpiar",
-        value="`!clear [n]` - Borra mensajes.",
-        inline=False,
-    )
+    embed = discord.Embed(title="🤖 Comandos de Zapy", color=discord.Color.blue())
+    embed.add_field(name="📅 Notion", value="`!eventos` - Lista exámenes/tareas.", inline=False)
+    embed.add_field(name="➕ Añadir", value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.", inline=False)
+    embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Genera apuntes.", inline=False)
+    embed.add_field(name="🧹 Limpiar", value="`!clear [n]` - Borra mensajes.", inline=False)
     await ctx.send(embed=embed)
 
 
@@ -612,14 +586,9 @@ async def generar_apuntes_completos(ctx, *, args: str):
                 config=config,
             )
 
-            exito = await asyncio.to_thread(
-                _crear_apunte_notion_completo, asignatura, tema, response.text
-            )
+            exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
             if exito:
-                await ctx.send(
-                    f"🚀 **Masterclass generada:** **{tema}**"
-                    f" ({asignatura.capitalize()}) publicada en Notion."
-                )
+                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.")
             else:
                 await ctx.send("❌ Error al exportar a Notion.")
         except Exception as e:
