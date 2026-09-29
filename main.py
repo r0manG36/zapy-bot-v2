@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import re
+import sys
 import urllib.request
 import urllib.error
 import discord
@@ -41,6 +42,10 @@ NOTION_ASIGNATURAS_MAP = {
     "historia": os.getenv("NOTION_GEOHIST_ID"),
     "geografia": os.getenv("NOTION_GEOHIST_ID"),
 }
+
+if not TOKEN:
+    print("❌ ERROR CRÍTICO: FALTA DISCORD_TOKEN EN .ENV")
+    sys.exit(1)
 
 client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
 
@@ -86,7 +91,7 @@ ESTRUCTURA:
 - ERRORES TÍPICOS Y SOLUCIONES: Explicación y resolución completa."""
 
 
-# --- CLIENTE HTTP DIRECTO PARA NOTION ---
+# --- CLIENTE HTTP NOTION ---
 def _http_notion_request(endpoint, method="POST", payload=None):
     if not NOTION_TOKEN:
         return None
@@ -172,6 +177,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
         NOTION_CACHE_TIMESTAMP = ahora
         return res_texto
     except Exception as e:
+        print(f"Error obtener_eventos_notion: {e}")
         return f"❌ Error al consultar Notion: {e}"
 
 
@@ -272,12 +278,18 @@ def _guardar_ids_disco(ids_set):
         print(f"Error guardando caché disco: {e}")
 
 
-# --- DEPURADOR DE SÍMBOLOS Y SINTAXIS LATEX ---
 def _limpiar_y_sanear_latex(texto):
     texto = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", texto)
     texto = texto.replace("\r\n", "\n")
-    # Limpia espacios innecesarios pegados a los delimitadores $$     texto = re.sub(r"\$\$\s+", "$$", texto)
-    texto = re.sub(r"\s+\$\$", "$$", texto)     return texto   def _convertir_linea_a_bloque_notion(linea):     linea = _limpiar_y_sanear_latex(linea.strip())     if not linea:         return None      # Ecuaciones independientes centradas ($$)
+    texto = re.sub(r"\$\$\s+", "$$", texto)     texto = re.sub(r"\s+\$\$", "$$", texto)
+    return texto
+
+
+def _convertir_linea_a_bloque_notion(linea):
+    linea = _limpiar_y_sanear_latex(linea.strip())
+    if not linea:
+        return None
+
     if linea.startswith("$$") and linea.endswith("$$") and len(linea) > 4:
         expr = linea[2:-2].strip()
         return {
@@ -305,7 +317,6 @@ def _limpiar_y_sanear_latex(texto):
     texto_contenido = linea[prefijo_len:].strip()
 
     rich_text = []
-    # Parsea ecuaciones integradas en el texto ($...$)
     partes = re.split(r"(\$.*?\$)", texto_contenido)
 
     for parte in partes:
@@ -363,7 +374,12 @@ async def comprobar_nuevos_eventos():
     if not NOTION_TOKEN or not NOTION_DATABASE_ID or not CANAL_NOTIFICACIONES_ID:
         return
     try:
-        canal = bot.get_channel(int(CANAL_NOTIFICACIONES_ID))
+        try:
+            canal_id = int(CANAL_NOTIFICACIONES_ID)
+        except ValueError:
+            return
+
+        canal = bot.get_channel(canal_id)
         if not canal:
             return
 
@@ -419,7 +435,7 @@ async def enviar_mensaje_largo(destino, texto):
 async def on_ready():
     global IDS_MEMORIA_RAM
     IDS_MEMORIA_RAM = await asyncio.to_thread(_cargar_ids_disco)
-    print(f"Zapy activo como {bot.user} (IDs en RAM: {len(IDS_MEMORIA_RAM)})")
+    print(f"✅ Zapy activo y listo como: {bot.user} (IDs en RAM: {len(IDS_MEMORIA_RAM)})")
     if not comprobar_nuevos_eventos.is_running():
         comprobar_nuevos_eventos.start()
 
@@ -568,7 +584,7 @@ async def generar_apuntes_completos(ctx, *, args: str):
 
             exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
             if exito:
-                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion con símbolos limpios.")
+                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.")
             else:
                 await ctx.send("❌ Error al exportar a Notion.")
         except Exception as e:
