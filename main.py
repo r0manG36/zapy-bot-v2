@@ -96,19 +96,16 @@ Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del 
 Para fórmulas sencillas o variables dentro del texto plano, mantén las ecuaciones inline entre signos de dólar ($) con formato LaTeX estricto, sin añadir espacios ni símbolos extraños, para que la integración las convierta directamente en ecuaciones nativas visuales."""
 
 
-# --- MÓDULO CALENDARIO Y NOTION CORREGIDO ---
+# --- MÓDULO NOTION CORREGIDO (SDK NATIVO) ---
 def _query_notion_database_raw(database_id):
     if not notion or not database_id:
         return None
     try:
-        # Se elimina la barra inicial para evitar InvalidRequestURL
-        path_clean = f"databases/{database_id}/query".strip("/")
-        return notion.request(
-            path=path_clean,
-            method="POST"
-        )
+        # Uso nativo del método de la librería de Notion para evitar errores de URL
+        db_id_limpio = database_id.strip()
+        return notion.databases.query(database_id=db_id_limpio)
     except Exception as e:
-        print(f"Error query Notion ({database_id}): {e}")
+        print(f"❌ Error al consultar Notion (ID: {database_id}): {e}")
         return None
 
 
@@ -160,7 +157,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
         if not response:
             return (
                 "❌ No se pudo conectar con la base de datos de Notion. Revisa"
-                " los permisos de la integración."
+                " que la integración esté agregada como conexión."
             )
 
         results = response.get("results", [])
@@ -184,6 +181,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
         NOTION_CACHE_TIMESTAMP = ahora
         return res_texto
     except Exception as e:
+        print(f"Error obtener_eventos_notion: {e}")
         return f"❌ Error al consultar Notion: {e}"
 
 
@@ -192,7 +190,7 @@ def _crear_tarea_notion_sync(nombre, fecha_str):
         return False
     try:
         nueva_pagina = {
-            "parent": {"database_id": NOTION_DATABASE_ID},
+            "parent": {"database_id": NOTION_DATABASE_ID.strip()},
             "properties": {"Nombre": {"title": [{"text": {"content": nombre}}]}},
         }
         if fecha_str:
@@ -356,7 +354,7 @@ def _crear_apunte_notion_completo(asignatura, tema, contenido_markdown):
         return False
     try:
         nueva_pagina = notion.pages.create(
-            parent={"database_id": db_target},
+            parent={"database_id": db_target.strip()},
             properties={
                 "Nombre": {
                     "title": [{"text": {"content": f"Masterclass: {tema}"}}]
@@ -461,58 +459,62 @@ async def on_message(message):
         es_dm = isinstance(message.channel, discord.DMChannel)
 
         if es_hilo or es_mencion or es_dm:
-            if client_gemini:
-                texto_limpio = (
-                    message.content.replace(f"<@{bot.user.id}>", "").strip()
-                )
-                destino = message.channel
-                if not es_hilo and not es_dm:
-                    try:
-                        destino = await message.create_thread(
-                            name=f"Planificación - {message.author.display_name}"
-                        )
-                    except Exception as e:
-                        destino = message.channel
-
-                try:
-                    async with destino.typing():
-                        eventos_notion = await obtener_eventos_notion()
-                        ahora = datetime.datetime.now()
-                        dias_semana = [
-                            "Lunes",
-                            "Martes",
-                            "Miércoles",
-                            "Jueves",
-                            "Viernes",
-                            "Sábado",
-                            "Domingo",
-                        ]
-                        dia_hoy = dias_semana[ahora.weekday()]
-                        fecha_hoy_str = ahora.strftime("%d/%m/%Y")
-
-                        prompt_completo = (
-                            f"HOY ES: {dia_hoy}, {fecha_hoy_str}\n\n"
-                            f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\n"
-                            f"PETICIÓN DEL ALUMNO:\n{texto_limpio}"
-                        )
-
-                        config = types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT_BASE,
-                            temperature=0.3,
-                            max_output_tokens=400,
-                        )
-
-                        response = await asyncio.to_thread(
-                            client_gemini.models.generate_content,
-                            model=GEMINI_MODEL,
-                            contents=prompt_completo,
-                            config=config,
-                        )
-                        await enviar_mensaje_largo(destino, response.text)
-                except Exception as e:
-                    await destino.send(f"❌ Error al responder: {e}")
-            else:
+            if not client_gemini:
                 await message.channel.send("⚠️ API de Gemini no configurada.")
+                return
+
+            texto_limpio = (
+                message.content.replace(f"<@{bot.user.id}>", "").strip()
+            )
+            destino = message.channel
+            if not es_hilo and not es_dm:
+                try:
+                    destino = await message.create_thread(
+                        name=f"Planificación - {message.author.display_name}"
+                    )
+                except Exception as e:
+                    destino = message.channel
+
+            try:
+                async with destino.typing():
+                    eventos_notion = await obtener_eventos_notion()
+                    ahora = datetime.datetime.now()
+                    dias_semana = [
+                        "Lunes",
+                        "Martes",
+                        "Miércoles",
+                        "Jueves",
+                        "Viernes",
+                        "Sábado",
+                        "Domingo",
+                    ]
+                    dia_hoy = dias_semana[ahora.weekday()]
+                    fecha_hoy_str = ahora.strftime("%d/%m/%Y")
+
+                    prompt_completo = (
+                        f"HOY ES: {dia_hoy}, {fecha_hoy_str}\n\n"
+                        f"EXÁMENES Y EVENTOS EN NOTION:\n{eventos_notion}\n\n"
+                        f"PETICIÓN DEL ALUMNO:\n{texto_limpio}"
+                    )
+
+                    config = types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT_BASE,
+                        temperature=0.3,
+                        max_output_tokens=400,
+                    )
+
+                    response = await asyncio.to_thread(
+                        client_gemini.models.generate_content,
+                        model=GEMINI_MODEL,
+                        contents=prompt_completo,
+                        config=config,
+                    )
+                    await enviar_mensaje_largo(destino, response.text)
+            except Exception as e:
+                print(f"Error Gemini: {e}")
+                await destino.send(
+                    f"❌ Ocurrió un error al procesar con la IA: {e}"
+                )
 
     await bot.process_commands(message)
 
