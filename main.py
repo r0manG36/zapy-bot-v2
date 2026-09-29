@@ -73,30 +73,20 @@ Rutina Semanal Base:
 Genera la planificación evaluando en qué día y fecha concreta te encuentras hoy respecto a las fechas de los exámenes en Notion. Organiza únicamente los días venideros."""
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
-El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
 
-ESTRUCTURA Y REGLAS DE FORMATO:
+REGLAS DE FORMATO MATEMÁTICO Y SÍMBOLOS:
+1. Usa sintaxis LaTeX limpia. Ecuaciones en línea de texto: $expresion$. Ecuaciones centradas independientes: $$expresion$$.
+2. NO uses caracteres Unicode extraños o símbolos raros de formato para superíndices o subíndices; utiliza siempre LaTeX estricto (ej. $x^2$, $H_2O$).
+3. Evita saltos de línea dentro de bloques de ecuaciones LaTeX.
 
 ESTRUCTURA:
-INTRODUCCION DEL TEMA, RAPIDO Y CLARO. EJEMPLO: “ESTA MASTERCLASS TRATA DE LAS ECUACIONES DE SEGUNDO GRADO, AQUI APRENDERAS A HACERLAS PASO A PASO Y LUEGO TENDRAS UN EJERCICIOS DE PRUEBA”
-
-FASE DE APRENDIZAJE: EN ESTA FASE VAS A ENSEÑARME PASO CÓMO ENSEÑARME A HACER “X” EJERCICIO O EL TEMA. AQUÍ, IRAS PASO A PASO EJEMPLO: PARA CONVERTIR UN ORACION NOMINAL EN UNA VERBAL, PRIMERO DEBES DE CAMBIAR ESTO… LUEGO HAY UN EJEMPLO DE LA EXPLICACION ABAJO Y ASI CONSTANTEMENTE. PD: SI ES ALGUNA MASTERCLASS DE IDIOMA PON EL EJEMPLO EN LA LENGUA QUE SE QUIERE APRENDER.
-
-FASE DE EJERCICIOS DE PRACTICA: EN LA PENULTIMA FASE CREA EJERCICIOS DE PRUEBA PARA PRACTICAR LO APRENDIDO. HAZLOS DE MAS FACILES A MAS DIFICILES.
-
-ERRORES TIPICOS Y CORRECCION DE EJERCICIOS: ENSEÑA LOS ERRORES TIPICOS CON SU EXPLICACIÓN. DA LA CORRECION DE EJERCICIOS CON SU RESPECTIVA EXPLICACION.
-
-Jerarquía Visual Clara: Usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
-Glosario de Conceptos Clave: Al inicio de cada sección, destaca en negrita las definiciones exactas necesarias para bordar las preguntas teóricas de examen.
-Formulario Formal (si aplica): Si el tema involucra ciencias, matemáticas o lógica, incluye todas las fórmulas necesarias en formato LaTeX ($inline$ para texto y $$display$$ para ecuaciones centradas), explicando el significado y las unidades de cada variable.
-Desglose de Conceptos: Emplea listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones de forma limpia.
-
-Tono y Enfoque: Directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea.
-
-Para fórmulas sencillas o variables dentro del texto plano, mantén las ecuaciones inline entre signos de dólar ($) con formato LaTeX estricto, sin añadir espacios ni símbolos extraños, para que la integración las convierta directamente en ecuaciones nativas visuales."""
+- INTRODUCCIÓN: Clara y directa.
+- FASE DE APRENDIZAJE: Explicación paso a paso con ejemplos.
+- FASE DE EJERCICIOS DE PRÁCTICA: De fáciles a difíciles.
+- ERRORES TÍPICOS Y SOLUCIONES: Explicación y resolución completa."""
 
 
-# --- CLIENTE HTTP DIRECTO PARA NOTION (SIN DEPENDENCIAS BUGGEADAS) ---
+# --- CLIENTE HTTP DIRECTO PARA NOTION ---
 def _http_notion_request(endpoint, method="POST", payload=None):
     if not NOTION_TOKEN:
         return None
@@ -161,7 +151,7 @@ async def obtener_eventos_notion(forzar_refresco=False):
         endpoint = f"databases/{NOTION_DATABASE_ID.strip()}/query"
         response = await asyncio.to_thread(_http_notion_request, endpoint, "POST")
         if not response:
-            return "❌ No se pudo conectar con Notion. Comprueba que el ID y el Token de Notion sean correctos."
+            return "❌ No se pudo conectar con Notion."
 
         results = response.get("results", [])
         if not results:
@@ -182,7 +172,6 @@ async def obtener_eventos_notion(forzar_refresco=False):
         NOTION_CACHE_TIMESTAMP = ahora
         return res_texto
     except Exception as e:
-        print(f"Error obtener_eventos_notion: {e}")
         return f"❌ Error al consultar Notion: {e}"
 
 
@@ -208,13 +197,7 @@ def _extraer_texto_de_bloques(block_list):
     lineas = []
     for block in block_list:
         b_type = block.get("type")
-        if b_type in [
-            "paragraph",
-            "heading_1",
-            "heading_2",
-            "heading_3",
-            "bulleted_list_item",
-        ]:
+        if b_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
             rich = block.get(b_type, {}).get("rich_text", [])
             texto = "".join([t.get("plain_text", "") for t in rich])
             if texto:
@@ -289,17 +272,13 @@ def _guardar_ids_disco(ids_set):
         print(f"Error guardando caché disco: {e}")
 
 
-def _limpiar_texto_markdown(texto):
+# --- DEPURADOR DE SÍMBOLOS Y SINTAXIS LATEX ---
+def _limpiar_y_sanear_latex(texto):
     texto = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", texto)
-    return texto.replace("\r\n", "\n")
-
-
-def _convertir_linea_a_bloque_notion(linea):
-    linea = _limpiar_texto_markdown(linea.strip())
-    if not linea:
-        return None
-
-    if linea.startswith("$$") and linea.endswith("$$"):
+    texto = texto.replace("\r\n", "\n")
+    # Limpia espacios innecesarios pegados a los delimitadores $$     texto = re.sub(r"\$\$\s+", "$$", texto)
+    texto = re.sub(r"\s+\$\$", "$$", texto)     return texto   def _convertir_linea_a_bloque_notion(linea):     linea = _limpiar_y_sanear_latex(linea.strip())     if not linea:         return None      # Ecuaciones independientes centradas ($$)
+    if linea.startswith("$$") and linea.endswith("$$") and len(linea) > 4:
         expr = linea[2:-2].strip()
         return {
             "object": "block",
@@ -326,6 +305,7 @@ def _convertir_linea_a_bloque_notion(linea):
     texto_contenido = linea[prefijo_len:].strip()
 
     rich_text = []
+    # Parsea ecuaciones integradas en el texto ($...$)
     partes = re.split(r"(\$.*?\$)", texto_contenido)
 
     for parte in partes:
@@ -588,7 +568,7 @@ async def generar_apuntes_completos(ctx, *, args: str):
 
             exito = await asyncio.to_thread(_crear_apunte_notion_completo, asignatura, tema, response.text)
             if exito:
-                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.")
+                await ctx.send(f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion con símbolos limpios.")
             else:
                 await ctx.send("❌ Error al exportar a Notion.")
         except Exception as e:
