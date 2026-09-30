@@ -452,7 +452,7 @@ async def on_message(message):
 
         if es_hilo or es_mencion or es_dm:
             if not client_gemini:
-                await message.channel.send("⚠️ API de Gemini no configurada.")
+                await message.channel.send("⚠️️ API de Gemini no configurada.")
                 return
 
             texto_limpio = message.content.replace(f"<@{bot.user.id}>", "").strip()
