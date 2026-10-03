@@ -514,8 +514,7 @@ _RE_INLINE = re.compile(r"(\$\$[^$\n]+\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\*\*[^*\n]+
 
 
 def _limpiar_texto(texto: str) -> str:
-    texto = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", texto)
-    return texto.replace("\r\n", "\n")
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", texto.replace("\r\n", "\n")).strip()
 
 
 def _trozos_texto(texto: str, negrita: bool = False) -> list[dict]:
