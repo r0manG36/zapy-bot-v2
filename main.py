@@ -1,8 +1,11 @@
-"""Zapy 1.3.0 - Tutor académico en Discord (Gemini + Notion).
+"""Zapy 1.4.0 (en desarrollo) - Tutor académico multiusuario en Discord (Gemini + Notion).
 
-Cambios principales respecto a 1.2.2: ver el resumen de la revisión.
+Paso 1 del modo multiusuario: capa de datos (SQLite) con tokens cifrados (Fernet)
+y migración automática del perfil del propietario. El comportamiento del bot
+todavía no cambia: los pasos siguientes harán que Notion, el prompt y Gemini
+dependan del usuario.
 Dependencias: discord.py>=2.3, aiohttp (viene con discord.py), python-dotenv,
-google-genai y, en Windows, tzdata (para zoneinfo).
+google-genai, cryptography y, en Windows, tzdata (para zoneinfo).
 """
 from __future__ import annotations
 
@@ -12,7 +15,9 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -22,6 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import aiohttp
 import discord
 from discord.ext import commands, tasks
+from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
@@ -58,6 +64,17 @@ USUARIOS_PERMITIDOS = {
     int(x) for x in os.getenv("USUARIOS_PERMITIDOS", "").replace(" ", "").split(",") if x.isdigit()
 }
 
+# Propietario: su configuración actual del .env se migra a la base de datos
+# la primera vez. Si no se define, se usa USUARIOS_PERMITIDOS si solo hay uno.
+OWNER_ID = _a_int(os.getenv("OWNER_ID")) or (
+    next(iter(USUARIOS_PERMITIDOS)) if len(USUARIOS_PERMITIDOS) == 1 else None
+)
+
+# Clave maestra (Fernet) con la que se cifran los tokens de cada usuario.
+# Generar una vez:  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SECRET_KEY = (os.getenv("ZAPY_SECRET_KEY") or "").strip()
+DB_FILE = Path(os.getenv("ZAPY_DB", "zapy.db"))
+
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 # Nombres de las propiedades en tus bases de datos de Notion.
@@ -73,6 +90,8 @@ except ZoneInfoNotFoundError:  # Windows sin tzdata
 NOTION_IDS_FILE = Path("notion_ids.json")
 CACHE_EVENTOS_TTL = 60  # s
 CACHE_ALGORITMOS_TTL = 3600  # s
+CACHE_ESQUEMA_TTL = 3600  # s
+INTERVALO_AVISOS = 300  # s entre revisiones de eventos nuevos (se recorre a cada usuario)
 MAX_ALGORITMO_CHARS = 20_000
 HISTORIAL_MENSAJES = 10
 COOLDOWN_IA = 5  # s entre peticiones de IA por usuario
@@ -109,7 +128,8 @@ ASIGNATURAS: dict[str, str] = {
 
 DIAS_SEMANA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-client_gemini = genai.Client(api_key=GEMINI_KEY) if GEMINI_KEY else None
+# Gemini y Notion ya no son globales: cada usuario usa su propia clave y su propio token.
+# Las variables NOTION_*/GEMINI_API_KEY del .env solo sirven para migrar al propietario.
 
 # ----------------------------------------------------------------------------
 # PROMPTS
@@ -170,6 +190,12 @@ Domingo: Entre las 13:00 y 16:00 no puedo.
 
 Quiero que me respondas diciendo en que momento estudio, con que metodo, que asignatura… Ejemplo:  A las 3:15 Tienes que estudiar mates con este metodo “x” hasta las 5:00
 """
+
+# El primer párrafo es la persona de Zapy (válida para todos); el resto es el perfil
+# y la rutina del propietario, que se migra a la base de datos como su rutina.
+PERSONA_BASE, _, RUTINA_PROPIETARIO = SYSTEM_PROMPT_BASE.partition("\n\n")
+RUTINA_PROPIETARIO = RUTINA_PROPIETARIO.strip()
+
 
 SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
 El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
@@ -261,6 +287,273 @@ class Notion:
 
 
 # ----------------------------------------------------------------------------
+# DATOS DE USUARIO (SQLite local + tokens cifrados con Fernet)
+# ----------------------------------------------------------------------------
+class Boveda:
+    """Cifra/descifra secretos (tokens de Notion, claves de Gemini) con la clave maestra."""
+
+    def __init__(self, clave: str):
+        self._fernet = Fernet(clave.encode("ascii"))
+
+    def cifrar(self, texto: str) -> str:
+        return self._fernet.encrypt(texto.encode("utf-8")).decode("ascii")
+
+    def descifrar(self, token: str) -> str | None:
+        try:
+            return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError):
+            return None  # clave maestra distinta o dato corrupto
+
+
+@dataclass(frozen=True)
+class Perfil:
+    """Configuración personal de un usuario (secretos ya descifrados, solo en memoria)."""
+    user_id: int
+    curso: str
+    rutina: str
+    notion_token: str | None
+    notion_calendario_id: str | None
+    gemini_key: str | None
+    asignaturas: dict[str, str]  # alias normalizado -> ID de su base de datos en Notion
+
+    @property
+    def tiene_notion(self) -> bool:
+        return bool(self.notion_token)
+
+    @property
+    def tiene_calendario(self) -> bool:
+        return bool(self.notion_token and self.notion_calendario_id)
+
+    @property
+    def tiene_gemini(self) -> bool:
+        return bool(self.gemini_key)
+
+
+_CAMPOS_TEXTO = frozenset({"curso", "rutina", "notion_calendario_id"})
+_CAMPOS_SECRETOS = frozenset({"notion_token", "gemini_key"})
+MAX_RUTINA_CHARS = 4000
+
+
+def _ahora_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+class Almacen:
+    """Persistencia por usuario. Las operaciones públicas son async (SQLite va en un hilo)."""
+
+    _ESQUEMA = """
+    CREATE TABLE IF NOT EXISTS usuarios (
+        user_id INTEGER PRIMARY KEY,
+        curso TEXT NOT NULL DEFAULT '',
+        rutina TEXT NOT NULL DEFAULT '',
+        notion_token TEXT,
+        notion_calendario_id TEXT,
+        gemini_key TEXT,
+        linea_base INTEGER NOT NULL DEFAULT 0,
+        creado TEXT NOT NULL,
+        actualizado TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS asignaturas (
+        user_id INTEGER NOT NULL REFERENCES usuarios(user_id) ON DELETE CASCADE,
+        alias TEXT NOT NULL,
+        db_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, alias)
+    );
+    CREATE TABLE IF NOT EXISTS eventos_vistos (
+        user_id INTEGER NOT NULL REFERENCES usuarios(user_id) ON DELETE CASCADE,
+        evento_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, evento_id)
+    );
+    """
+
+    def __init__(self, ruta: Path, boveda: Boveda):
+        self._boveda = boveda
+        self._lock = threading.Lock()
+        self._con = sqlite3.connect(ruta, check_same_thread=False)
+        self._con.row_factory = sqlite3.Row
+        with self._lock:
+            self._con.execute("PRAGMA journal_mode=WAL")
+            self._con.execute("PRAGMA foreign_keys=ON")
+            self._con.executescript(self._ESQUEMA)
+
+    def cerrar(self) -> None:
+        with self._lock:
+            self._con.close()
+
+    # --- API async ---------------------------------------------------------
+    async def obtener_perfil(self, user_id: int) -> Perfil | None:
+        return await asyncio.to_thread(self._obtener_perfil, user_id)
+
+    async def guardar_perfil(self, user_id: int, **campos: str | None) -> None:
+        """Crea o actualiza solo los campos indicados (curso, rutina, notion_token, ...)."""
+        await asyncio.to_thread(self._guardar_perfil, user_id, campos)
+
+    async def reemplazar_asignaturas(self, user_id: int, asignaturas: dict[str, str]) -> None:
+        await asyncio.to_thread(self._reemplazar_asignaturas, user_id, asignaturas)
+
+    async def borrar_usuario(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._borrar_usuario, user_id)
+
+    async def ids_con_calendario(self) -> list[int]:
+        return await asyncio.to_thread(self._ids_con_calendario)
+
+    async def ids_vistos(self, user_id: int) -> set[str] | None:
+        """None = aún no hay línea base de eventos para este usuario."""
+        return await asyncio.to_thread(self._ids_vistos, user_id)
+
+    async def fijar_linea_base(self, user_id: int, ids: set[str]) -> None:
+        await asyncio.to_thread(self._fijar_linea_base, user_id, ids)
+
+    async def marcar_vistos(self, user_id: int, ids: set[str]) -> None:
+        await asyncio.to_thread(self._marcar_vistos, user_id, ids)
+
+    # --- Implementación síncrona ------------------------------------------
+    def _descifrar_col(self, fila: sqlite3.Row, col: str) -> str | None:
+        if not fila[col]:
+            return None
+        valor = self._boveda.descifrar(fila[col])
+        if valor is None:
+            log.warning("No pude descifrar %s del usuario %s (¿cambió ZAPY_SECRET_KEY?)",
+                        col, fila["user_id"])
+        return valor
+
+    def _obtener_perfil(self, user_id: int) -> Perfil | None:
+        with self._lock:
+            fila = self._con.execute("SELECT * FROM usuarios WHERE user_id = ?", (user_id,)).fetchone()
+            if fila is None:
+                return None
+            asignaturas = {
+                r["alias"]: r["db_id"]
+                for r in self._con.execute("SELECT alias, db_id FROM asignaturas WHERE user_id = ?", (user_id,))
+            }
+        return Perfil(
+            user_id=user_id,
+            curso=fila["curso"],
+            rutina=fila["rutina"],
+            notion_token=self._descifrar_col(fila, "notion_token"),
+            notion_calendario_id=fila["notion_calendario_id"],
+            gemini_key=self._descifrar_col(fila, "gemini_key"),
+            asignaturas=asignaturas,
+        )
+
+    def _guardar_perfil(self, user_id: int, campos: dict[str, str | None]) -> None:
+        invalidos = set(campos) - _CAMPOS_TEXTO - _CAMPOS_SECRETOS
+        if invalidos:
+            raise ValueError(f"Campos de perfil no válidos: {sorted(invalidos)}")
+        valores: dict[str, str | None] = {}
+        for campo, valor in campos.items():
+            valor = (valor or "").strip()
+            if campo in _CAMPOS_SECRETOS:
+                valores[campo] = self._boveda.cifrar(valor) if valor else None
+            elif campo == "notion_calendario_id":
+                valores[campo] = valor or None
+            elif campo == "rutina":
+                valores[campo] = _limpiar_texto(valor)[:MAX_RUTINA_CHARS]
+            else:  # curso
+                valores[campo] = _limpiar_texto(valor)[:100]
+        ahora = _ahora_iso()
+        with self._lock, self._con:
+            self._con.execute(
+                "INSERT OR IGNORE INTO usuarios (user_id, creado, actualizado) VALUES (?, ?, ?)",
+                (user_id, ahora, ahora),
+            )
+            if valores:
+                sets = ", ".join(f"{c} = ?" for c in valores)  # nombres validados arriba
+                self._con.execute(
+                    f"UPDATE usuarios SET {sets}, actualizado = ? WHERE user_id = ?",
+                    (*valores.values(), ahora, user_id),
+                )
+
+    def _reemplazar_asignaturas(self, user_id: int, asignaturas: dict[str, str]) -> None:
+        filas = [(user_id, _norm(alias), db_id.strip()) for alias, db_id in asignaturas.items()
+                 if _norm(alias) and db_id.strip()]
+        with self._lock, self._con:
+            self._con.execute("DELETE FROM asignaturas WHERE user_id = ?", (user_id,))
+            self._con.executemany("INSERT OR REPLACE INTO asignaturas VALUES (?, ?, ?)", filas)
+
+    def _borrar_usuario(self, user_id: int) -> bool:
+        with self._lock, self._con:  # ON DELETE CASCADE limpia asignaturas y eventos_vistos
+            return self._con.execute("DELETE FROM usuarios WHERE user_id = ?", (user_id,)).rowcount > 0
+
+    def _ids_con_calendario(self) -> list[int]:
+        with self._lock:
+            filas = self._con.execute(
+                "SELECT user_id FROM usuarios WHERE notion_token IS NOT NULL "
+                "AND notion_calendario_id IS NOT NULL AND notion_calendario_id != ''"
+            ).fetchall()
+        return [f["user_id"] for f in filas]
+
+    def _ids_vistos(self, user_id: int) -> set[str] | None:
+        with self._lock:
+            fila = self._con.execute("SELECT linea_base FROM usuarios WHERE user_id = ?", (user_id,)).fetchone()
+            if fila is None or not fila["linea_base"]:
+                return None
+            return {r["evento_id"] for r in
+                    self._con.execute("SELECT evento_id FROM eventos_vistos WHERE user_id = ?", (user_id,))}
+
+    def _fijar_linea_base(self, user_id: int, ids: set[str]) -> None:
+        with self._lock, self._con:
+            self._con.execute("DELETE FROM eventos_vistos WHERE user_id = ?", (user_id,))
+            self._con.executemany("INSERT OR IGNORE INTO eventos_vistos VALUES (?, ?)",
+                                  [(user_id, i) for i in ids])
+            self._con.execute("UPDATE usuarios SET linea_base = 1 WHERE user_id = ?", (user_id,))
+
+    def _marcar_vistos(self, user_id: int, ids: set[str]) -> None:
+        with self._lock, self._con:
+            self._con.executemany("INSERT OR IGNORE INTO eventos_vistos VALUES (?, ?)",
+                                  [(user_id, i) for i in ids])
+
+
+async def migrar_propietario(almacen: Almacen, ids_vistos: set[str] | None) -> None:
+    """Primer arranque: vuelca la configuración del .env del propietario a la base de datos.
+
+    Es idempotente: si el propietario ya existe no se toca nada.
+    """
+    if OWNER_ID is None:
+        log.info("Migración omitida: define OWNER_ID en el .env para migrar tu configuración.")
+        return
+    if await almacen.obtener_perfil(OWNER_ID) is not None:
+        return
+    await almacen.guardar_perfil(
+        OWNER_ID,
+        curso="4º ESO científico",
+        rutina=RUTINA_PROPIETARIO,
+        notion_token=NOTION_TOKEN or None,
+        notion_calendario_id=NOTION_DATABASE_ID or None,
+        gemini_key=GEMINI_KEY or None,
+    )
+    await almacen.reemplazar_asignaturas(OWNER_ID, ASIGNATURAS)
+    if ids_vistos is not None:
+        await almacen.fijar_linea_base(OWNER_ID, ids_vistos)
+    log.info("✅ Configuración del propietario (%s) migrada a %s", OWNER_ID, DB_FILE)
+
+
+# ----------------------------------------------------------------------------
+# PROMPT PERSONALIZADO (persona común + datos de cada usuario)
+# ----------------------------------------------------------------------------
+INSTRUCCION_FORMATO = (
+    "Cuando te pida planificar, responde indicando en qué momento estudiar, qué asignatura y con qué "
+    'método, respetando sus horarios fijos. Ejemplo: "A las 15:15 estudia Mates con el método X hasta '
+    'las 17:00". Tu usuario es estudiante de ESO o Bachillerato: mantén siempre un tono y un contenido '
+    "apropiados para su edad."
+)
+
+
+def construir_system_prompt(perfil: Perfil, eventos: str, ahora: dt.datetime) -> str:
+    rutina = perfil.rutina or (
+        "(Todavía no ha escrito su rutina. Si te pide un plan, pregúntale por sus horarios "
+        "o recuérdale que puede guardarla con `!configurar`.)"
+    )
+    curso = f"CURSO DEL ESTUDIANTE: {perfil.curso}\n\n" if perfil.curso else ""
+    return (
+        f"{PERSONA_BASE}\n\n{INSTRUCCION_FORMATO}\n\n{curso}"
+        f"PERFIL Y RUTINA DEL ESTUDIANTE:\n{rutina}\n\n"
+        f"HOY ES: {DIAS_SEMANA[ahora.weekday()]}, {ahora:%d/%m/%Y}, {ahora:%H:%M}\n\n"
+        f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos}"
+    )
+
+
+# ----------------------------------------------------------------------------
 # BOT
 # ----------------------------------------------------------------------------
 class ZapyBot(commands.Bot):
@@ -269,20 +562,34 @@ class ZapyBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.session: aiohttp.ClientSession | None = None
-        self.notion: Notion | None = None
-        # None = aún no sabemos qué eventos existían (primer arranque).
-        self.ids_vistos: set[str] | None = None
+        self.almacen: Almacen | None = None
+        # Un cliente de Notion por usuario: cada token tiene su propio límite de peticiones.
+        self._notion_por_usuario: dict[int, tuple[str, Notion]] = {}
+
+    def notion_de(self, perfil: Perfil) -> Notion | None:
+        """Cliente de Notion del usuario, o None si no ha conectado su token."""
+        if not perfil.notion_token or self.session is None:
+            return None
+        guardado = self._notion_por_usuario.get(perfil.user_id)
+        if guardado and guardado[0] == perfil.notion_token:
+            return guardado[1]
+        notion = Notion(perfil.notion_token, self.session)
+        self._notion_por_usuario[perfil.user_id] = (perfil.notion_token, notion)
+        return notion
 
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
-        if NOTION_TOKEN:
-            self.notion = Notion(NOTION_TOKEN, self.session)
-        self.ids_vistos = await asyncio.to_thread(_cargar_ids_disco)
+        self.almacen = await asyncio.to_thread(Almacen, DB_FILE, Boveda(SECRET_KEY))
+        # Los IDs de eventos del modo antiguo (un solo usuario) solo sirven para migrar.
+        ids_legado = await asyncio.to_thread(_cargar_ids_disco)
+        await migrar_propietario(self.almacen, ids_legado)
         comprobar_nuevos_eventos.start()
 
     async def close(self):
         if self.session:
             await self.session.close()
+        if self.almacen:
+            await asyncio.to_thread(self.almacen.cerrar)
         await super().close()
 
 
@@ -296,6 +603,38 @@ def autorizado(user: discord.abc.User) -> bool:
 @bot.check
 async def _solo_autorizados(ctx: commands.Context) -> bool:
     return autorizado(ctx.author)
+
+
+MSG_SIN_CONFIGURAR = (
+    "👋 Todavía no tienes tu Zapy configurado. Usa `!configurar` para añadir tu clave gratuita "
+    "de Gemini, tu rutina y, si quieres, tu Notion."
+)
+MSG_FALTA_GEMINI = "🔑 Te falta añadir tu clave de Gemini. Hazlo con `!configurar`."
+MSG_FALTA_NOTION = "📓 Aún no has conectado tu Notion. Hazlo con `!configurar`."
+MSG_FALTA_CALENDARIO = "📅 Aún no has indicado tu calendario de Notion. Hazlo con `!configurar`."
+MSG_CLAVE_GEMINI = "🔑 Tu clave de Gemini no es válida o ha dejado de funcionar. Actualízala con `!configurar`."
+MSG_CUOTA_GEMINI = (
+    "⏳ Tu clave de Gemini ha llegado al límite gratuito por ahora. "
+    "Espera unos minutos (o al día siguiente) e inténtalo de nuevo."
+)
+
+
+async def requerir_perfil(user_id: int, enviar, *, notion: bool = False, calendario: bool = False,
+                          gemini: bool = False) -> Perfil | None:
+    """Perfil del usuario si cumple los requisitos; si no, le avisa con `enviar` y devuelve None."""
+    perfil = await bot.almacen.obtener_perfil(user_id) if bot.almacen else None
+    if perfil is None:
+        aviso = MSG_SIN_CONFIGURAR
+    elif gemini and not perfil.tiene_gemini:
+        aviso = MSG_FALTA_GEMINI
+    elif (notion or calendario) and not perfil.tiene_notion:
+        aviso = MSG_FALTA_NOTION
+    elif calendario and not perfil.tiene_calendario:
+        aviso = MSG_FALTA_CALENDARIO
+    else:
+        return perfil
+    await enviar(aviso)
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -353,20 +692,21 @@ def _pagina_a_evento(page: dict) -> Evento:
     return Evento(page["id"], _extraer_titulo(props), inicio, fin)
 
 
-_cache_eventos: tuple[float, list[Evento]] | None = None
+_cache_eventos: dict[int, tuple[float, list[Evento]]] = {}
 
 
-async def obtener_eventos(forzar: bool = False) -> list[Evento]:
-    """Devuelve los eventos de Notion (caché de 60 s). Lanza NotionError si falla."""
-    global _cache_eventos
+async def obtener_eventos(perfil: Perfil, forzar: bool = False) -> list[Evento]:
+    """Eventos del calendario de Notion del usuario (caché de 60 s). Lanza NotionError si falla."""
     ahora = time.monotonic()
-    if not forzar and _cache_eventos and ahora - _cache_eventos[0] < CACHE_EVENTOS_TTL:
-        return _cache_eventos[1]
-    if not bot.notion or not NOTION_DATABASE_ID:
-        raise NotionError("`NOTION_TOKEN` o `NOTION_DATABASE_ID` no están configurados en el `.env`.")
-    paginas = await bot.notion.query_database(NOTION_DATABASE_ID)
-    eventos = [_pagina_a_evento(p) for p in paginas]
-    _cache_eventos = (ahora, eventos)
+    cacheado = _cache_eventos.get(perfil.user_id)
+    if not forzar and cacheado and ahora - cacheado[0] < CACHE_EVENTOS_TTL:
+        return cacheado[1]
+    notion = bot.notion_de(perfil)
+    if notion is None or not perfil.notion_calendario_id:
+        raise NotionError("Notion no está conectado. Configúralo con `!configurar`.")
+    paginas = await notion.query_database(perfil.notion_calendario_id)
+    eventos = [_pagina_a_evento(pg) for pg in paginas]
+    _cache_eventos[perfil.user_id] = (ahora, eventos)
     return eventos
 
 
@@ -392,54 +732,72 @@ def _cargar_ids_disco() -> set[str] | None:
         return None
 
 
-def _guardar_ids_disco(ids: set[str]) -> None:
-    try:
-        tmp = NOTION_IDS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(sorted(ids), indent=2), encoding="utf-8")
-        tmp.replace(NOTION_IDS_FILE)  # escritura atómica
-    except OSError:
-        log.exception("No pude guardar %s", NOTION_IDS_FILE)
-
-
-@tasks.loop(seconds=60)
-async def comprobar_nuevos_eventos():
-    if not (bot.notion and NOTION_DATABASE_ID and CANAL_NOTIFICACIONES_ID):
-        return
-    try:
-        eventos = await obtener_eventos(forzar=True)
-        actuales = {e.id for e in eventos}
-
-        if bot.ids_vistos is None:  # primer arranque: línea base sin avisar
-            bot.ids_vistos = actuales
-            await asyncio.to_thread(_guardar_ids_disco, actuales)
-            return
-
+async def _destino_avisos(user_id: int):
+    """Canal fijo para el propietario (si lo configuró) y mensaje privado para el resto."""
+    if user_id == OWNER_ID and CANAL_NOTIFICACIONES_ID:
         canal = bot.get_channel(CANAL_NOTIFICACIONES_ID)
-        if canal is None:
-            return
+        if canal is not None:
+            return canal
+    try:
+        usuario = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        return await usuario.create_dm()
+    except discord.HTTPException:
+        return None
 
-        avisados: set[str] = set()
-        for ev in (e for e in eventos if e.id not in bot.ids_vistos):
-            embed = discord.Embed(
-                title="🆕 Nuevo evento en Notion",
-                description="Se ha detectado una nueva entrada en tu calendario.",
-                color=discord.Color.green(),
-            )
-            embed.add_field(name="📌 Evento", value=ev.nombre[:1024], inline=False)
-            embed.add_field(name="📅 Fecha", value=ev.fecha_texto, inline=False)
-            try:
-                await canal.send(embed=embed)
-                avisados.add(ev.id)
-            except discord.HTTPException:
-                log.exception("No pude avisar del evento %s (se reintentará)", ev.id)
 
-        if avisados:
-            bot.ids_vistos |= avisados
-            await asyncio.to_thread(_guardar_ids_disco, bot.ids_vistos)
-    except NotionError as e:
-        log.warning("Notion no disponible: %s", e)
-    except Exception:
-        log.exception("Fallo inesperado en el bucle de eventos")
+async def _avisar_eventos_nuevos(user_id: int) -> None:
+    perfil = await bot.almacen.obtener_perfil(user_id)
+    if perfil is None or not perfil.tiene_calendario:
+        return
+    eventos = await obtener_eventos(perfil, forzar=True)
+    actuales = {e.id for e in eventos}
+
+    vistos = await bot.almacen.ids_vistos(user_id)
+    if vistos is None:  # primera vez de este usuario: línea base sin avisar
+        await bot.almacen.fijar_linea_base(user_id, actuales)
+        return
+
+    nuevos = [e for e in eventos if e.id not in vistos]
+    if not nuevos:
+        return
+    destino = await _destino_avisos(user_id)
+    if destino is None:
+        return  # se reintentará en la próxima vuelta
+
+    avisados: set[str] = set()
+    for ev in nuevos:
+        embed = discord.Embed(
+            title="🆕 Nuevo evento en Notion",
+            description="Se ha detectado una nueva entrada en tu calendario.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="📌 Evento", value=ev.nombre[:1024], inline=False)
+        embed.add_field(name="📅 Fecha", value=ev.fecha_texto, inline=False)
+        try:
+            await destino.send(embed=embed)
+            avisados.add(ev.id)
+        except discord.Forbidden:  # mensajes privados cerrados: no insistir
+            log.info("No puedo avisar al usuario %s (mensajes privados cerrados)", user_id)
+            avisados.update(e.id for e in nuevos)
+            break
+        except discord.HTTPException:
+            log.exception("No pude avisar del evento %s (se reintentará)", ev.id)
+    if avisados:
+        await bot.almacen.marcar_vistos(user_id, avisados)
+
+
+@tasks.loop(seconds=INTERVALO_AVISOS)
+async def comprobar_nuevos_eventos():
+    if bot.almacen is None:
+        return
+    for user_id in await bot.almacen.ids_con_calendario():
+        try:
+            await _avisar_eventos_nuevos(user_id)
+        except NotionError as e:
+            log.warning("Notion no disponible para el usuario %s: %s", user_id, e)
+        except Exception:
+            log.exception("Fallo inesperado revisando eventos del usuario %s", user_id)
+        await asyncio.sleep(1)  # escalonado: no lanzar todas las consultas a la vez
 
 
 @comprobar_nuevos_eventos.before_loop
@@ -471,38 +829,38 @@ def _bloques_a_texto(bloques: list[dict]) -> str:
     return "\n".join(lineas)
 
 
-def resolver_asignatura(nombre: str) -> str | None:
-    return ASIGNATURAS.get(_norm(nombre))
+def resolver_asignatura(perfil: Perfil, nombre: str) -> str | None:
+    return perfil.asignaturas.get(_norm(nombre))
 
 
-_cache_algoritmos: dict[str, tuple[float, str]] = {}
+_cache_algoritmos: dict[tuple[int, str], tuple[float, str]] = {}
 
 
-async def obtener_algoritmo_asignatura(db_id: str) -> str:
+async def obtener_algoritmo_asignatura(perfil: Perfil, db_id: str) -> str:
     """Metodología de la asignatura guardada en su base de datos de Notion."""
     ahora = time.monotonic()
-    cacheado = _cache_algoritmos.get(db_id)
+    clave = (perfil.user_id, db_id)
+    cacheado = _cache_algoritmos.get(clave)
     if cacheado and ahora - cacheado[0] < CACHE_ALGORITMOS_TTL:
         return cacheado[1]
-    if not bot.notion:
+    notion = bot.notion_de(perfil)
+    if notion is None:
         return ""
     try:
-        paginas = await bot.notion.query_database(db_id)
+        paginas = await notion.query_database(db_id)
         # Las masterclasses generadas viven en la misma base de datos: no se
         # reinyectan como "metodología" o el prompt crecería en cada uso.
         paginas = [
-            p for p in paginas
-            if not _extraer_titulo(p.get("properties", {})).startswith("Masterclass:")
+            pg for pg in paginas
+            if not _extraer_titulo(pg.get("properties", {})).startswith("Masterclass:")
         ]
-        textos = await asyncio.gather(
-            *(bot.notion.children(p["id"]) for p in paginas)
-        )
+        textos = await asyncio.gather(*(notion.children(pg["id"]) for pg in paginas))
         contenido = "\n\n---\n\n".join(t for t in map(_bloques_a_texto, textos) if t)
         contenido = contenido[:MAX_ALGORITMO_CHARS]
     except NotionError as e:
         log.warning("No pude leer la metodología (%s): %s", db_id, e)
         return ""  # no se cachea el fallo
-    _cache_algoritmos[db_id] = (ahora, contenido)
+    _cache_algoritmos[clave] = (ahora, contenido)
     return contenido
 
 
@@ -617,43 +975,104 @@ def markdown_a_bloques(markdown: str) -> list[dict]:
     return [b for b in bloques if b]
 
 
-async def crear_pagina_notion(db_id: str, titulo: str, fecha: str | None = None,
+_cache_esquemas: dict[str, tuple[float, tuple[str, str | None]]] = {}
+
+
+async def propiedades_db(notion: Notion, db_id: str) -> tuple[str, str | None]:
+    """Nombre de la propiedad de título y de fecha de una base de datos (cada usuario puede
+    llamarlas distinto: "Nombre"/"Name", "Fecha"/"Date"...)."""
+    ahora = time.monotonic()
+    cacheado = _cache_esquemas.get(db_id)
+    if cacheado and ahora - cacheado[0] < CACHE_ESQUEMA_TTL:
+        return cacheado[1]
+    props = (await notion.request("GET", f"databases/{db_id}")).get("properties", {})
+    titulo = PROP_TITULO if props.get(PROP_TITULO, {}).get("type") == "title" else next(
+        (n for n, v in props.items() if v.get("type") == "title"), PROP_TITULO
+    )
+    fechas = [n for n, v in props.items() if v.get("type") == "date"]
+    fecha = PROP_FECHA if PROP_FECHA in fechas else (fechas[0] if fechas else None)
+    _cache_esquemas[db_id] = (ahora, (titulo, fecha))
+    return titulo, fecha
+
+
+async def crear_pagina_notion(notion: Notion, db_id: str, titulo: str, fecha: str | None = None,
                               bloques: list[dict] | None = None) -> dict:
     """Crea una página; los primeros 100 bloques van en la misma petición."""
-    assert bot.notion is not None
-    props: dict = {PROP_TITULO: {"title": [{"text": {"content": titulo[:RICH_MAX]}}]}}
+    prop_titulo, prop_fecha = await propiedades_db(notion, db_id)
+    props: dict = {prop_titulo: {"title": [{"text": {"content": titulo[:RICH_MAX]}}]}}
     if fecha:
-        props[PROP_FECHA] = {"date": {"start": fecha}}
+        if not prop_fecha:
+            raise NotionError("Tu base de datos no tiene ninguna propiedad de tipo fecha.")
+        props[prop_fecha] = {"date": {"start": fecha}}
     cuerpo: dict = {"parent": {"database_id": db_id}, "properties": props}
     bloques = bloques or []
     if bloques:
         cuerpo["children"] = bloques[:100]
-    pagina = await bot.notion.request("POST", "pages", cuerpo)
+    pagina = await notion.request("POST", "pages", cuerpo)
     for i in range(100, len(bloques), 100):
-        await bot.notion.request(
-            "PATCH", f"blocks/{pagina['id']}/children", {"children": bloques[i : i + 100]}
-        )
+        await notion.request("PATCH", f"blocks/{pagina['id']}/children", {"children": bloques[i : i + 100]})
     return pagina
 
 
 # ----------------------------------------------------------------------------
 # GEMINI
 # ----------------------------------------------------------------------------
-async def generar_texto(contents, system: str, max_tokens: int, temperature: float = 0.3) -> str:
-    if not client_gemini:
-        raise RuntimeError("API de Gemini no configurada")
+class ClaveGeminiError(Exception):
+    """La clave de Gemini del usuario falta, no es válida o no tiene permiso."""
+
+
+class CuotaGeminiError(Exception):
+    """La clave de Gemini del usuario ha agotado su cuota gratuita."""
+
+
+_clientes_gemini: dict[int, tuple[str, genai.Client]] = {}
+
+
+def cliente_gemini(perfil: Perfil) -> genai.Client | None:
+    """Cliente de Gemini con la clave del propio usuario (cada uno gasta su cuota gratuita)."""
+    if not perfil.gemini_key:
+        return None
+    guardado = _clientes_gemini.get(perfil.user_id)
+    if guardado and guardado[0] == perfil.gemini_key:
+        return guardado[1]
+    cliente = genai.Client(api_key=perfil.gemini_key)
+    _clientes_gemini[perfil.user_id] = (perfil.gemini_key, cliente)
+    return cliente
+
+
+def invalidar_cache_usuario(user_id: int) -> None:
+    """Olvida todo lo guardado en memoria de un usuario (al cambiar su configuración o borrarlo)."""
+    _cache_eventos.pop(user_id, None)
+    _clientes_gemini.pop(user_id, None)
+    bot._notion_por_usuario.pop(user_id, None)
+    for clave in [k for k in _cache_algoritmos if k[0] == user_id]:
+        del _cache_algoritmos[clave]
+
+
+def _clave_rechazada(e: genai_errors.APIError) -> bool:
+    return e.code in {401, 403} or (e.code == 400 and "api key" in str(e).lower())
+
+
+async def generar_texto(cliente: genai.Client | None, contents, system: str, max_tokens: int,
+                        temperature: float = 0.3) -> str:
+    if cliente is None:
+        raise ClaveGeminiError()
     config = types.GenerateContentConfig(
         system_instruction=system, temperature=temperature, max_output_tokens=max_tokens
     )
     for intento in range(3):
         try:
-            resp = await client_gemini.aio.models.generate_content(
+            resp = await cliente.aio.models.generate_content(
                 model=GEMINI_MODEL, contents=contents, config=config
             )
         except genai_errors.APIError as e:
+            if _clave_rechazada(e):
+                raise ClaveGeminiError() from None  # sin el texto original: podría citar la clave
             if e.code in {429, 500, 503, 504} and intento < 2:
                 await asyncio.sleep(2 ** (intento + 1))
                 continue
+            if e.code == 429:
+                raise CuotaGeminiError() from e
             raise
         texto = (resp.text or "").strip()
         if not texto:
@@ -732,14 +1151,15 @@ async def construir_conversacion(message: discord.Message, texto: str) -> list[t
 
 
 async def responder_con_ia(message: discord.Message) -> None:
-    if not client_gemini:
-        await message.channel.send("⚠️ API de Gemini no configurada.")
-        return
-
     texto = limpiar_mencion(message.content)
     if not texto:
         await message.reply("¿En qué te ayudo? Cuéntame qué quieres planificar o estudiar.",
                             mention_author=False)
+        return
+    perfil = await requerir_perfil(
+        message.author.id, lambda t: message.reply(t, mention_author=False), gemini=True
+    )
+    if perfil is None:
         return
     if _en_cooldown(message.author.id):
         await message.add_reaction("⏳")
@@ -756,20 +1176,24 @@ async def responder_con_ia(message: discord.Message) -> None:
 
     try:
         async with destino.typing():
-            try:
-                eventos = formatear_eventos(await obtener_eventos())
-            except NotionError as e:
-                log.warning("Eventos no disponibles para la IA: %s", e)
-                eventos = "(no disponibles en este momento)"
+            if perfil.tiene_calendario:
+                try:
+                    eventos = formatear_eventos(await obtener_eventos(perfil))
+                except NotionError as e:
+                    log.warning("Eventos no disponibles para la IA (usuario %s): %s", perfil.user_id, e)
+                    eventos = "(no disponibles en este momento)"
+            else:
+                eventos = "(el usuario no ha conectado su calendario de Notion)"
 
-            ahora = dt.datetime.now(TZ)
-            system = (
-                f"{SYSTEM_PROMPT_BASE}\n\n"
-                f"HOY ES: {DIAS_SEMANA[ahora.weekday()]}, {ahora:%d/%m/%Y}, {ahora:%H:%M}\n\n"
-                f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos}"
-            )
+            system = construir_system_prompt(perfil, eventos, dt.datetime.now(TZ))
             conversacion = await construir_conversacion(message, texto)
-            respuesta = await generar_texto(conversacion, system, MAX_TOKENS_CHAT)
+            respuesta = await generar_texto(cliente_gemini(perfil), conversacion, system, MAX_TOKENS_CHAT)
+    except ClaveGeminiError:
+        await destino.send(MSG_CLAVE_GEMINI)
+        return
+    except CuotaGeminiError:
+        await destino.send(MSG_CUOTA_GEMINI)
+        return
     except Exception:
         log.exception("Error al responder con IA")
         await destino.send("❌ No he podido generar la respuesta ahora mismo. Inténtalo de nuevo en un momento.")
@@ -792,8 +1216,7 @@ def _debe_responder(message: discord.Message) -> bool:
 # ----------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    log.info("✅ Zapy activo como %s (eventos conocidos: %s)", bot.user,
-             len(bot.ids_vistos) if bot.ids_vistos is not None else "línea base pendiente")
+    log.info("✅ Zapy activo como %s", bot.user)
 
 
 @bot.event
@@ -858,8 +1281,11 @@ async def limpiar_mensajes(ctx: commands.Context, cantidad: int = 100):
 @bot.command(name="eventos")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def ver_eventos(ctx: commands.Context):
+    perfil = await requerir_perfil(ctx.author.id, ctx.send, calendario=True)
+    if perfil is None:
+        return
     try:
-        eventos = await obtener_eventos(forzar=True)
+        eventos = await obtener_eventos(perfil, forzar=True)
     except NotionError as e:
         await ctx.send(f"❌ No pude consultar Notion: {e}")
         return
@@ -880,16 +1306,16 @@ async def anadir_evento(ctx: commands.Context, *, args: str):
         except ValueError:
             await ctx.send("⚠️ Fecha no válida. Usa el formato `AAAA-MM-DD` (por ejemplo `2026-11-20`).")
             return
-    if not bot.notion or not NOTION_DATABASE_ID:
-        await ctx.send("❌ Notion no está configurado en el `.env`.")
+    perfil = await requerir_perfil(ctx.author.id, ctx.send, calendario=True)
+    if perfil is None:
         return
 
     async with ctx.typing():
         try:
-            await crear_pagina_notion(NOTION_DATABASE_ID, nombre, fecha)
-            await obtener_eventos(forzar=True)
+            await crear_pagina_notion(bot.notion_de(perfil), perfil.notion_calendario_id, nombre, fecha)
+            await obtener_eventos(perfil, forzar=True)
         except NotionError as e:
-            log.warning("Error creando evento: %s", e)
+            log.warning("Error creando evento (usuario %s): %s", perfil.user_id, e)
             await ctx.send("❌ Error al guardar en Notion.")
             return
     await ctx.send(f"✅ Evento **{nombre}** creado en Notion.", allowed_mentions=SIN_MENCIONES)
@@ -904,29 +1330,40 @@ async def generar_apuntes(ctx: commands.Context, *, args: str):
         ctx.command.reset_cooldown(ctx)
         return
 
-    db_id = resolver_asignatura(asignatura)
+    perfil = await requerir_perfil(ctx.author.id, ctx.send, notion=True, gemini=True)
+    if perfil is None:
+        ctx.command.reset_cooldown(ctx)
+        return
+    db_id = resolver_asignatura(perfil, asignatura)
     if not db_id:
-        disponibles = ", ".join(f"`{a}`" for a in sorted(ASIGNATURAS)) or "ninguna configurada en el `.env`"
+        disponibles = ", ".join(f"`{a}`" for a in sorted(perfil.asignaturas)) or "ninguna configurada (usa `!configurar`)"
         await ctx.send(f"⚠️ No conozco la asignatura **{asignatura}**. Disponibles: {disponibles}",
                        allowed_mentions=SIN_MENCIONES)
         ctx.command.reset_cooldown(ctx)
         return
-    if not client_gemini or not bot.notion:
-        await ctx.send("❌ Faltan `GEMINI_API_KEY` o `NOTION_TOKEN` en el `.env`.")
-        return
 
     async with ctx.typing():
         try:
-            algoritmo = await obtener_algoritmo_asignatura(db_id)
+            algoritmo = await obtener_algoritmo_asignatura(perfil, db_id)
             prompt = f"Elabora la Masterclass sobre '{tema}' de '{asignatura}'."
+            if perfil.curso:
+                prompt += f" Curso del estudiante: {perfil.curso}."
             if algoritmo:
                 prompt += f"\n\n--- METODOLOGÍA Y ALGORITMO ---\n{algoritmo}"
-            markdown = await generar_texto(prompt, SYSTEM_PROMPT_MASTERCLASS, MAX_TOKENS_MASTERCLASS)
-            pagina = await crear_pagina_notion(
-                db_id, f"Masterclass: {tema}", bloques=markdown_a_bloques(markdown)
+            markdown = await generar_texto(
+                cliente_gemini(perfil), prompt, SYSTEM_PROMPT_MASTERCLASS, MAX_TOKENS_MASTERCLASS
             )
+            pagina = await crear_pagina_notion(
+                bot.notion_de(perfil), db_id, f"Masterclass: {tema}", bloques=markdown_a_bloques(markdown)
+            )
+        except ClaveGeminiError:
+            await ctx.send(MSG_CLAVE_GEMINI)
+            return
+        except CuotaGeminiError:
+            await ctx.send(MSG_CUOTA_GEMINI)
+            return
         except NotionError as e:
-            log.warning("Error exportando masterclass: %s", e)
+            log.warning("Error exportando masterclass (usuario %s): %s", perfil.user_id, e)
             await ctx.send("❌ Error al exportar a Notion.")
             return
         except Exception:
@@ -944,6 +1381,15 @@ async def generar_apuntes(ctx: commands.Context, *, args: str):
 def main() -> None:
     if not TOKEN:
         log.critical("❌ ERROR CRÍTICO: FALTA DISCORD_TOKEN EN .ENV")
+        sys.exit(1)
+    try:
+        Boveda(SECRET_KEY)
+    except (ValueError, TypeError):
+        log.critical(
+            "❌ Falta ZAPY_SECRET_KEY (o no es válida) en el .env. Genera una con:\n"
+            '   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"\n'
+            "   Guárdala y haz copia: sin ella no se pueden descifrar los datos de los usuarios."
+        )
         sys.exit(1)
     bot.run(TOKEN, log_handler=None)  # el logging ya está configurado arriba
 
