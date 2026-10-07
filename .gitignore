@@ -1,0 +1,7 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+notion_ids.json
+backup_*/
+venv/
