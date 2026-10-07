@@ -1,9 +1,8 @@
 """Zapy 1.4.0 (en desarrollo) - Tutor académico multiusuario en Discord (Gemini + Notion).
 
-Paso 1 del modo multiusuario: capa de datos (SQLite) con tokens cifrados (Fernet)
-y migración automática del perfil del propietario. El comportamiento del bot
-todavía no cambia: los pasos siguientes harán que Notion, el prompt y Gemini
-dependan del usuario.
+Modo multiusuario: datos por usuario en SQLite con tokens cifrados (Fernet), Notion,
+prompt y clave de Gemini propios de cada persona, y `!configurar` (panel con botones y
+formularios) para que cada usuario se configure sin tocar el servidor.
 Dependencias: discord.py>=2.3, aiohttp (viene con discord.py), python-dotenv,
 google-genai, cryptography y, en Windows, tzdata (para zoneinfo).
 """
@@ -1255,17 +1254,546 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
 
 # ----------------------------------------------------------------------------
+# CONFIGURACIÓN POR USUARIO (!configurar: panel con botones y formularios)
+# ----------------------------------------------------------------------------
+MAX_ASIGNATURAS = 15
+URL_CLAVE_GEMINI = "https://aistudio.google.com/apikey"
+URL_INTEGRACIONES_NOTION = "https://www.notion.so/my-integrations"
+
+AYUDA_CONFIG = (
+    "**🔑 Clave de Gemini (gratis)**\n"
+    f"1. Entra en {URL_CLAVE_GEMINI} con tu cuenta de Google.\n"
+    "2. Pulsa *Crear clave de API* y cópiala.\n"
+    "3. Dale a **Clave de Gemini** en el panel y pégala. Cada persona usa su propia clave.\n\n"
+    "**📓 Notion (opcional)**\n"
+    f"1. Entra en {URL_INTEGRACIONES_NOTION} y crea una integración interna. Copia su *token*.\n"
+    "2. En Notion, abre la página o base de datos que quieres usar → menú **⋯** → **Conexiones** "
+    "y añade tu integración. Sin este paso Zapy no puede verla.\n"
+    "3. Elige **Conectar Notion** (pegas los enlaces de tus bases) o **Crear mi Notion** "
+    "(Zapy crea el calendario y una base por asignatura dentro de una página tuya).\n\n"
+    "Zapy lee las páginas de cada base de asignatura como tu metodología de estudio y guarda "
+    "ahí las masterclasses de `!apuntes`."
+)
+
+_RE_ID_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_RE_ID_HEX = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", re.IGNORECASE)
+_RE_LINEA_ASIG = re.compile(r"^\s*(?P<alias>[^=|:]+?)\s*[=|:]\s*(?P<resto>.+)$")
+
+
+def extraer_id_notion(texto: str) -> str | None:
+    """ID de una página/base de Notion a partir de un enlace o del propio ID."""
+    ruta = texto.strip().split("?")[0].split("#")[0]  # fuera ?v=<vista> y anclas
+    for patron in (_RE_ID_UUID, _RE_ID_HEX):
+        hallados = patron.findall(ruta)
+        if hallados:
+            return hallados[-1].replace("-", "").lower()
+    return None
+
+
+def parsear_asignaturas(texto: str) -> tuple[dict[str, str], list[str]]:
+    """Líneas 'Nombre = enlace' -> ({nombre: id}, líneas que no se entienden)."""
+    encontradas: dict[str, str] = {}
+    errores: list[str] = []
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        m = _RE_LINEA_ASIG.match(linea)
+        db_id = extraer_id_notion(m["resto"]) if m else None
+        alias = m["alias"].strip() if m else ""
+        if not db_id or not alias or alias.lower() in {"http", "https"}:
+            errores.append(linea[:40])
+        else:
+            encontradas[alias] = db_id
+    return encontradas, errores
+
+
+_GRUPOS_ALIAS = [[_norm(a) for a in lista] for lista in _ALIAS_ASIGNATURAS.values()]
+
+
+def alias_equivalentes(nombre: str) -> list[str]:
+    """Sinónimos de una asignatura conocida ('Mates' -> mates, matematicas); si no, solo ella."""
+    n = _norm(nombre)
+    for grupo in _GRUPOS_ALIAS:
+        if n in grupo:
+            return list(grupo)
+    return [n] if n else []
+
+
+def construir_alias(asignaturas: dict[str, str]) -> dict[str, str]:
+    """{nombre: id} -> {alias normalizado: id}. Lo que escribe el usuario manda sobre los sinónimos."""
+    resultado = {_norm(n): i for n, i in asignaturas.items() if _norm(n)}
+    for nombre, db_id in asignaturas.items():
+        for alias in alias_equivalentes(nombre):
+            resultado.setdefault(alias, db_id)
+    return resultado
+
+
+def asignaturas_unicas(perfil: Perfil | None) -> list[tuple[str, str]]:
+    """Una entrada por base de datos (con su alias más corto), ordenadas por nombre."""
+    por_id: dict[str, str] = {}
+    for alias, db_id in (perfil.asignaturas.items() if perfil else []):
+        actual = por_id.get(db_id)
+        if actual is None or (len(alias), alias) < (len(actual), actual):
+            por_id[db_id] = alias
+    return sorted((alias, db_id) for db_id, alias in por_id.items())
+
+
+async def comprobar_token_notion(notion: Notion) -> str | None:
+    """None si el token funciona; si no, el motivo en lenguaje claro."""
+    try:
+        await notion.request("GET", "users/me")
+    except NotionError as e:
+        if "HTTP 401" in str(e):
+            return "ese token de Notion no es válido"
+        return "no he podido comprobar el token ahora mismo"
+    return None
+
+
+async def comprobar_acceso_notion(notion: Notion, endpoint: str) -> str | None:
+    """None si la integración puede leer `endpoint` (databases/<id> o pages/<id>)."""
+    try:
+        await notion.request("GET", endpoint)
+    except NotionError as e:
+        msg = str(e)
+        if "HTTP 404" in msg:
+            return "no existe o no la has compartido con tu integración (menú ⋯ → Conexiones)"
+        if "HTTP 400" in msg:
+            return "ese enlace no corresponde a lo que esperaba"
+        if "HTTP 401" in msg:
+            return "el token de Notion no es válido"
+        return "no he podido comprobarla ahora mismo"
+    return None
+
+
+async def comprobar_clave_gemini(clave: str) -> tuple[bool, str]:
+    """Prueba la clave con una llamada mínima. Devuelve (se_guarda, mensaje)."""
+    try:
+        await genai.Client(api_key=clave).aio.models.generate_content(
+            model=GEMINI_MODEL, contents="Di solo: ok",
+            config=types.GenerateContentConfig(max_output_tokens=16),
+        )
+    except genai_errors.APIError as e:
+        if _clave_rechazada(e):
+            return False, f"Esa clave no es válida. Genera otra en {URL_CLAVE_GEMINI}."
+        if e.code == 429:
+            return True, "Clave válida guardada, aunque ahora mismo ha agotado su límite gratuito."
+        return True, "Clave guardada, pero no he podido comprobarla ahora mismo (Gemini no respondió)."
+    except Exception:
+        return True, "Clave guardada, pero no he podido comprobarla ahora mismo."
+    return True, "Clave de Gemini comprobada y guardada."
+
+
+def embed_panel(perfil: Perfil | None) -> discord.Embed:
+    def marca(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    p = perfil
+    embed = discord.Embed(
+        title="⚙️ Configura tu Zapy",
+        description=(
+            "Pulsa un botón para rellenar cada parte. Solo es obligatoria la **clave de Gemini**; "
+            "lo demás hace tus planes más precisos. Tus claves se guardan cifradas y nunca se muestran."
+        ),
+        color=discord.Color.blue(),
+    )
+    embed.add_field(
+        name="🔑 Gemini (obligatoria)",
+        value=f"{marca(bool(p and p.tiene_gemini))} " + ("Conectada" if p and p.tiene_gemini else "Falta tu clave"),
+        inline=False,
+    )
+    detalle = f"{p.curso or 'sin curso'} · {len(p.rutina)} caracteres de rutina" if p and p.rutina else "Falta tu rutina"
+    embed.add_field(name="👤 Perfil y rutina", value=f"{marca(bool(p and p.rutina))} {detalle}", inline=False)
+    unicas = asignaturas_unicas(p)
+    embed.add_field(
+        name="📓 Notion (opcional)",
+        value=(
+            f"{marca(bool(p and p.tiene_notion))} Token\n"
+            f"{marca(bool(p and p.tiene_calendario))} Calendario de exámenes\n"
+            f"{marca(bool(unicas))} Asignaturas"
+            + (f": {', '.join(a for a, _ in unicas)[:600]}" if unicas else "")
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def _avisar(interaction: discord.Interaction, texto: str) -> None:
+    """Respuesta privada (solo la ve quien pulsó), antes o después de un defer."""
+    if interaction.response.is_done():
+        await interaction.followup.send(texto, ephemeral=True)
+    else:
+        await interaction.response.send_message(texto, ephemeral=True)
+
+
+class _ModalBase(discord.ui.Modal):
+    def __init__(self, vista: "PanelConfig", titulo: str):
+        super().__init__(title=titulo)
+        self.vista = vista
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error("Error en un formulario de configuración", exc_info=error)
+        await _avisar(interaction, "❌ Algo ha fallado al guardar. Inténtalo de nuevo en un momento.")
+
+
+class ModalGemini(_ModalBase):
+    def __init__(self, vista: "PanelConfig"):
+        super().__init__(vista, "Clave de Gemini")
+        self.clave = discord.ui.TextInput(
+            label="Clave de API (Google AI Studio)", placeholder="AIza...", min_length=20, max_length=200
+        )
+        self.add_item(self.clave)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        clave = self.clave.value.strip().strip("\"'` ")
+        if len(clave) < 20 or any(c.isspace() for c in clave):
+            await _avisar(interaction, f"❌ Esa clave no tiene el formato correcto. Cópiala entera desde {URL_CLAVE_GEMINI}.")
+            return
+        guardar, mensaje = await comprobar_clave_gemini(clave)
+        if not guardar:
+            await _avisar(interaction, f"❌ {mensaje}")
+            return
+        await bot.almacen.guardar_perfil(interaction.user.id, gemini_key=clave)
+        invalidar_cache_usuario(interaction.user.id)
+        await _avisar(interaction, f"✅ {mensaje}")
+        await self.vista.refrescar()
+
+
+class ModalPerfil(_ModalBase):
+    def __init__(self, vista: "PanelConfig", perfil: Perfil | None):
+        super().__init__(vista, "Tu perfil y rutina")
+        self.curso = discord.ui.TextInput(
+            label="Curso", placeholder="Ej.: 1º Bachillerato científico",
+            default=(perfil.curso if perfil else "") or None, max_length=100,
+        )
+        self.rutina = discord.ui.TextInput(
+            label="Tu rutina y horarios", style=discord.TextStyle.paragraph,
+            placeholder="Clases, extraescolares, cuándo prefieres estudiar, qué se te da mal...",
+            default=(perfil.rutina if perfil else "") or None, max_length=MAX_RUTINA_CHARS,
+        )
+        self.add_item(self.curso)
+        self.add_item(self.rutina)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await bot.almacen.guardar_perfil(
+            interaction.user.id, curso=self.curso.value, rutina=self.rutina.value
+        )
+        await _avisar(interaction, "✅ Perfil y rutina guardados. Zapy ya los usa en tus planes.")
+        await self.vista.refrescar()
+
+
+class ModalNotion(_ModalBase):
+    """Conectar Notion pegando los enlaces de bases de datos que el usuario ya tiene."""
+
+    def __init__(self, vista: "PanelConfig", perfil: Perfil | None):
+        super().__init__(vista, "Conectar tu Notion")
+        self.tiene_token = bool(perfil and perfil.notion_token)
+        self.token = discord.ui.TextInput(
+            label="Token de tu integración de Notion",
+            placeholder="Vacío = mantener el actual" if self.tiene_token else "ntn_... (o secret_...)",
+            required=not self.tiene_token, max_length=300,
+        )
+        self.calendario = discord.ui.TextInput(
+            label="Enlace de tu calendario de exámenes",
+            placeholder="https://www.notion.so/...", required=False, max_length=300,
+            default=(perfil.notion_calendario_id if perfil else "") or None,
+        )
+        previo = "\n".join(f"{a} = {i}" for a, i in asignaturas_unicas(perfil)) or None
+        self.asignaturas = discord.ui.TextInput(
+            label="Asignaturas (Nombre = enlace, una por línea)", style=discord.TextStyle.paragraph,
+            placeholder="Mates = https://www.notion.so/...\nInglés = https://www.notion.so/...",
+            required=False, max_length=3000, default=previo,
+        )
+        for campo in (self.token, self.calendario, self.asignaturas):
+            self.add_item(campo)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        uid = interaction.user.id
+        perfil = await bot.almacen.obtener_perfil(uid)
+        token = self.token.value.strip() or (perfil.notion_token if perfil else None)
+        if not token:
+            await _avisar(interaction, "❌ Necesito el token de tu integración de Notion.")
+            return
+        notion = Notion(token, bot.session)
+        motivo = await comprobar_token_notion(notion)
+        if motivo:
+            await _avisar(interaction, f"❌ {motivo[0].upper() + motivo[1:]}. Mira el botón ❓ Ayuda.")
+            return
+
+        cambios: dict[str, str] = {"notion_token": token}
+        informe = ["✅ Token de Notion comprobado."]
+
+        texto_cal = self.calendario.value.strip()
+        if texto_cal:
+            cal_id = extraer_id_notion(texto_cal)
+            motivo = await comprobar_acceso_notion(notion, f"databases/{cal_id}") if cal_id else "no encuentro un enlace válido"
+            if motivo:
+                informe.append(f"⚠️ Calendario: {motivo}.")
+            else:
+                cambios["notion_calendario_id"] = cal_id
+                informe.append("✅ Calendario conectado.")
+
+        nuevas, ilegibles = parsear_asignaturas(self.asignaturas.value)
+        asignaturas_ok: dict[str, str] | None = None
+        if nuevas or ilegibles:
+            problemas = [f"«{linea}» no tiene el formato Nombre = enlace" for linea in ilegibles]
+            if len(nuevas) > MAX_ASIGNATURAS:
+                problemas.append(f"máximo {MAX_ASIGNATURAS} asignaturas")
+            else:
+                motivos = await asyncio.gather(
+                    *(comprobar_acceso_notion(notion, f"databases/{i}") for i in nuevas.values())
+                )
+                problemas += [f"{nombre}: {m}" for (nombre, _), m in zip(nuevas.items(), motivos) if m]
+            if problemas:
+                informe.append("⚠️ No he cambiado tus asignaturas:\n" + "\n".join(f"  • {x}" for x in problemas))
+            else:
+                asignaturas_ok = nuevas
+                informe.append(f"✅ {len(nuevas)} asignaturas conectadas.")
+
+        await bot.almacen.guardar_perfil(uid, **cambios)
+        if asignaturas_ok is not None:
+            await bot.almacen.reemplazar_asignaturas(uid, construir_alias(asignaturas_ok))
+        invalidar_cache_usuario(uid)
+        await _avisar(interaction, "\n".join(informe)[:1900])
+        await self.vista.refrescar()
+
+
+def _cuerpo_base_datos(padre_id: str, titulo: str, con_fecha: bool) -> dict:
+    props: dict = {"Nombre": {"title": {}}}
+    if con_fecha:
+        props["Fecha"] = {"date": {}}
+    return {
+        "parent": {"type": "page_id", "page_id": padre_id},
+        "title": [{"type": "text", "text": {"content": titulo[:100]}}],
+        "properties": props,
+    }
+
+
+class ModalNotionAuto(_ModalBase):
+    """Crea el calendario y una base de datos por asignatura dentro de una página del usuario."""
+
+    def __init__(self, vista: "PanelConfig", perfil: Perfil | None):
+        super().__init__(vista, "Crear mi Notion automáticamente")
+        self.tiene_token = bool(perfil and perfil.notion_token)
+        self.token = discord.ui.TextInput(
+            label="Token de tu integración de Notion",
+            placeholder="Vacío = mantener el actual" if self.tiene_token else "ntn_... (o secret_...)",
+            required=not self.tiene_token, max_length=300,
+        )
+        self.pagina = discord.ui.TextInput(
+            label="Enlace de una página tuya (compartida)",
+            placeholder="https://www.notion.so/... (la integración debe estar conectada)", max_length=300,
+        )
+        self.asignaturas = discord.ui.TextInput(
+            label="Tus asignaturas (una por línea)", style=discord.TextStyle.paragraph,
+            placeholder="Mates\nFísica y Química\nInglés", max_length=1000,
+        )
+        for campo in (self.token, self.pagina, self.asignaturas):
+            self.add_item(campo)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        uid = interaction.user.id
+        perfil = await bot.almacen.obtener_perfil(uid)
+        token = self.token.value.strip() or (perfil.notion_token if perfil else None)
+        if not token:
+            await _avisar(interaction, "❌ Necesito el token de tu integración de Notion.")
+            return
+
+        nombres: dict[str, str] = {}  # alias normalizado -> nombre tal como lo escribió
+        for linea in self.asignaturas.value.splitlines():
+            nombre = linea.strip()[:60]
+            if nombre and _norm(nombre) not in nombres:
+                nombres[_norm(nombre)] = nombre
+        if not nombres or len(nombres) > MAX_ASIGNATURAS:
+            await _avisar(interaction, f"❌ Escribe entre 1 y {MAX_ASIGNATURAS} asignaturas, una por línea.")
+            return
+        padre = extraer_id_notion(self.pagina.value)
+        if not padre:
+            await _avisar(interaction, "❌ No encuentro un enlace de página de Notion válido.")
+            return
+
+        notion = Notion(token, bot.session)
+        motivo = await comprobar_token_notion(notion)
+        if motivo:
+            await _avisar(interaction, f"❌ {motivo[0].upper() + motivo[1:]}. Mira el botón ❓ Ayuda.")
+            return
+        motivo = await comprobar_acceso_notion(notion, f"pages/{padre}")
+        if motivo:
+            await _avisar(interaction, f"❌ Esa página: {motivo}.")
+            return
+
+        try:
+            calendario = await notion.request("POST", "databases", _cuerpo_base_datos(padre, "Zapy · Calendario", True))
+        except NotionError as e:
+            log.warning("No pude crear el calendario (usuario %s): %s", uid, e)
+            permisos = " Comprueba que tu integración tiene permiso para insertar contenido." if "HTTP 403" in str(e) else ""
+            await _avisar(interaction, f"❌ No he podido crear el calendario en Notion.{permisos}")
+            return
+
+        resultados = await asyncio.gather(
+            *(notion.request("POST", "databases", _cuerpo_base_datos(padre, f"Zapy · {n}", False)) for n in nombres.values()),
+            return_exceptions=True,
+        )
+        creadas: dict[str, str] = {}
+        fallidas: list[str] = []
+        for nombre, res in zip(nombres.values(), resultados):
+            if isinstance(res, dict) and res.get("id"):
+                creadas[nombre] = res["id"]
+            else:
+                fallidas.append(nombre)
+                log.warning("No pude crear la base de %s (usuario %s): %s", nombre, uid, res)
+
+        await bot.almacen.guardar_perfil(uid, notion_token=token, notion_calendario_id=calendario["id"])
+        if creadas:
+            await bot.almacen.reemplazar_asignaturas(uid, construir_alias(creadas))
+        invalidar_cache_usuario(uid)
+
+        informe = [f"✅ He creado tu calendario y {len(creadas)} bases de asignaturas en Notion y ya están conectadas."]
+        if fallidas:
+            informe.append("⚠️ No pude crear: " + ", ".join(fallidas) + ". Vuelve a intentarlo solo con esas.")
+        informe.append("Las bases anteriores, si las había, no se han borrado. Añade páginas con tu método de "
+                       "estudio a una asignatura y Zapy lo usará en `!apuntes`.")
+        await _avisar(interaction, "\n".join(informe)[:1900])
+        await self.vista.refrescar()
+
+
+class ConfirmarBorrado(discord.ui.View):
+    def __init__(self, user_id: int, vista: "PanelConfig | None" = None):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.vista = vista
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Sí, borrar todo", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await bot.almacen.borrar_usuario(self.user_id)
+        invalidar_cache_usuario(self.user_id)
+        self.stop()
+        await interaction.response.edit_message(
+            content="🗑️ Listo: he borrado tu perfil, tus claves y tus asignaturas. Lo que hay en tu "
+                    "Notion no se ha tocado. Puedes volver a empezar con `!configurar`.",
+            view=None,
+        )
+        if self.vista:
+            await self.vista.refrescar()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancelar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Vale, no he borrado nada.", view=None)
+
+
+class PanelConfig(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=900)
+        self.user_id = user_id
+        self.mensaje: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Este panel es de otra persona. Escribe `!configurar` para abrir el tuyo.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def refrescar(self) -> None:
+        if self.mensaje is None:
+            return
+        perfil = await bot.almacen.obtener_perfil(self.user_id)
+        try:
+            await self.mensaje.edit(embed=embed_panel(perfil), view=self)
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.mensaje is not None:
+            try:
+                await self.mensaje.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        log.error("Error en el panel de configuración", exc_info=error)
+        await _avisar(interaction, "❌ Algo ha fallado. Vuelve a abrir el panel con `!configurar`.")
+
+    @discord.ui.button(label="Clave de Gemini", emoji="🔑", style=discord.ButtonStyle.primary, row=0)
+    async def boton_gemini(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ModalGemini(self))
+
+    @discord.ui.button(label="Perfil y rutina", emoji="👤", style=discord.ButtonStyle.primary, row=0)
+    async def boton_perfil(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ModalPerfil(self, await bot.almacen.obtener_perfil(self.user_id)))
+
+    @discord.ui.button(label="Conectar Notion", emoji="📓", style=discord.ButtonStyle.secondary, row=0)
+    async def boton_notion(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ModalNotion(self, await bot.almacen.obtener_perfil(self.user_id)))
+
+    @discord.ui.button(label="Crear mi Notion", emoji="✨", style=discord.ButtonStyle.secondary, row=0)
+    async def boton_notion_auto(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ModalNotionAuto(self, await bot.almacen.obtener_perfil(self.user_id)))
+
+    @discord.ui.button(label="Ayuda", emoji="❓", style=discord.ButtonStyle.secondary, row=1)
+    async def boton_ayuda(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(AYUDA_CONFIG, ephemeral=True)
+
+    @discord.ui.button(label="Borrar mis datos", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def boton_borrar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves y tus asignaturas de Zapy.",
+            view=ConfirmarBorrado(self.user_id, self), ephemeral=True,
+        )
+
+
+# ----------------------------------------------------------------------------
 # COMANDOS
 # ----------------------------------------------------------------------------
 @bot.command(name="comandos")
 async def mostrar_comandos(ctx: commands.Context):
     embed = discord.Embed(title="🤖 Comandos de Zapy", color=discord.Color.blue())
+    embed.add_field(name="⚙️ Configurar", value="`!configurar` - Tu clave de Gemini, tu rutina y tu Notion.", inline=False)
     embed.add_field(name="📅 Notion", value="`!eventos` - Lista los próximos exámenes/tareas.", inline=False)
     embed.add_field(name="➕ Añadir", value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.", inline=False)
     embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Genera apuntes en Notion.", inline=False)
     embed.add_field(name="🧹 Limpiar", value="`!clear [n]` - Borra mensajes (requiere permiso).", inline=False)
     embed.add_field(name="💬 Planificar", value="Menciona a Zapy o escríbele por DM.", inline=False)
     await ctx.send(embed=embed)
+
+
+@bot.command(name="configurar", aliases=["config"])
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def configurar(ctx: commands.Context):
+    perfil = await bot.almacen.obtener_perfil(ctx.author.id)
+    vista = PanelConfig(ctx.author.id)
+    embed = embed_panel(perfil)
+    try:  # por privado: así el panel no queda a la vista de todo el servidor
+        vista.mensaje = await ctx.author.send(embed=embed, view=vista)
+    except discord.Forbidden:
+        vista.mensaje = await ctx.send(
+            "⚠️ Tienes los mensajes privados cerrados, así que te muestro el panel aquí. "
+            "Tus claves solo las ve Zapy: se escriben en formularios privados.",
+            embed=embed, view=vista,
+        )
+        return
+    if not isinstance(ctx.channel, discord.DMChannel):
+        await ctx.send("📩 Te he enviado el panel de configuración por mensaje privado.", delete_after=20)
+
+
+@bot.command(name="borrar_mis_datos")
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def borrar_mis_datos(ctx: commands.Context):
+    await ctx.send(
+        "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves y tus asignaturas de Zapy.",
+        view=ConfirmarBorrado(ctx.author.id),
+    )
 
 
 @bot.command(name="clear")
