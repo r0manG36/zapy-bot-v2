@@ -2,7 +2,8 @@
 
 Modo multiusuario: datos por usuario en SQLite con tokens cifrados (Fernet), Notion,
 prompt y clave de Gemini propios de cada persona, y `!configurar` (panel con botones y
-formularios) para que cada usuario se configure sin tocar el servidor.
+formularios) para que cada usuario se configure sin tocar el servidor, y un planificador
+con temporizador (empezar/pausar/reanudar/terminar) que aprende cuánto tardas de verdad.
 Dependencias: discord.py>=2.3, aiohttp (viene con discord.py), python-dotenv,
 google-genai, cryptography y, en Windows, tzdata (para zoneinfo).
 """
@@ -12,6 +13,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -328,6 +330,38 @@ class Perfil:
         return bool(self.gemini_key)
 
 
+@dataclass(frozen=True)
+class Tarea:
+    """Una tarea con temporizador. Las marcas de tiempo son epoch (segundos) para sobrevivir a reinicios."""
+    id: int
+    user_id: int
+    asignatura: str          # tal como la escribió el usuario
+    clave: str               # asignatura normalizada (Mates y Matemáticas comparten clave)
+    descripcion: str
+    tipo: str                # practica | teoria | memoria | redaccion | otros
+    estimado_min: int | None
+    estado: str              # en_curso | pausada | terminada | abandonada
+    inicio_ts: int
+    reanudado_ts: int | None  # inicio del tramo actual; None si está en pausa o cerrada
+    acumulado_s: int         # segundos contados en tramos ya cerrados (la pausa no cuenta)
+    pausas: int
+    fin_ts: int | None
+    real_s: int | None
+    cansancio: int | None
+    dificultad: int | None
+    manual: bool
+
+    def transcurrido_s(self, ahora: int) -> int:
+        if self.estado in {"terminada", "abandonada"} and self.real_s is not None:
+            return self.real_s
+        extra = max(0, ahora - self.reanudado_ts) if self.reanudado_ts is not None else 0
+        return self.acumulado_s + extra
+
+
+_COLS_TAREA = ("id, user_id, asignatura, clave, descripcion, tipo, estimado_min, estado, inicio_ts, "
+               "reanudado_ts, acumulado_s, pausas, fin_ts, real_s, cansancio, dificultad, manual")
+
+
 _CAMPOS_TEXTO = frozenset({"curso", "rutina", "notion_calendario_id"})
 _CAMPOS_SECRETOS = frozenset({"notion_token", "gemini_key"})
 MAX_RUTINA_CHARS = 4000
@@ -363,6 +397,28 @@ class Almacen:
         evento_id TEXT NOT NULL,
         PRIMARY KEY (user_id, evento_id)
     );
+    CREATE TABLE IF NOT EXISTS tareas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES usuarios(user_id) ON DELETE CASCADE,
+        asignatura TEXT NOT NULL,
+        clave TEXT NOT NULL,
+        descripcion TEXT NOT NULL DEFAULT '',
+        tipo TEXT NOT NULL DEFAULT 'otros',
+        estimado_min INTEGER,
+        estado TEXT NOT NULL CHECK (estado IN ('en_curso', 'pausada', 'terminada', 'abandonada')),
+        inicio_ts INTEGER NOT NULL,
+        reanudado_ts INTEGER,
+        acumulado_s INTEGER NOT NULL DEFAULT 0,
+        pausas INTEGER NOT NULL DEFAULT 0,
+        fin_ts INTEGER,
+        real_s INTEGER,
+        cansancio INTEGER CHECK (cansancio BETWEEN 1 AND 5),
+        dificultad INTEGER CHECK (dificultad BETWEEN 1 AND 5),
+        manual INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS una_tarea_activa ON tareas(user_id)
+        WHERE estado IN ('en_curso', 'pausada');
+    CREATE INDEX IF NOT EXISTS tareas_por_usuario ON tareas(user_id, estado, fin_ts);
     """
 
     def __init__(self, ruta: Path, boveda: Boveda):
@@ -405,6 +461,33 @@ class Almacen:
 
     async def marcar_vistos(self, user_id: int, ids: set[str]) -> None:
         await asyncio.to_thread(self._marcar_vistos, user_id, ids)
+
+    async def iniciar_tarea(self, user_id: int, asignatura: str, clave: str, descripcion: str, tipo: str,
+                            estimado_min: int | None, ahora: int) -> Tarea | None:
+        """None si el usuario ya tiene una tarea en curso o en pausa."""
+        return await asyncio.to_thread(self._iniciar_tarea, user_id, asignatura, clave, descripcion,
+                                       tipo, estimado_min, ahora)
+
+    async def tarea_activa(self, user_id: int) -> Tarea | None:
+        return await asyncio.to_thread(self._tarea_activa, user_id)
+
+    async def pausar_tarea(self, user_id: int, ahora: int) -> Tarea | None:
+        return await asyncio.to_thread(self._pausar_tarea, user_id, ahora)
+
+    async def reanudar_tarea(self, user_id: int, ahora: int) -> Tarea | None:
+        return await asyncio.to_thread(self._reanudar_tarea, user_id, ahora)
+
+    async def cerrar_tarea(self, user_id: int, ahora: int, estado: str,
+                           minutos_manual: int | None = None) -> Tarea | None:
+        """Cierra la tarea activa como 'terminada' o 'abandonada'."""
+        return await asyncio.to_thread(self._cerrar_tarea, user_id, ahora, estado, minutos_manual)
+
+    async def valorar_tarea(self, tarea_id: int, user_id: int, cansancio: int | None = None,
+                            dificultad: int | None = None) -> bool:
+        return await asyncio.to_thread(self._valorar_tarea, tarea_id, user_id, cansancio, dificultad)
+
+    async def tareas_terminadas(self, user_id: int, limite: int = 1000) -> list[Tarea]:
+        return await asyncio.to_thread(self._tareas_terminadas, user_id, limite)
 
     # --- Implementación síncrona ------------------------------------------
     def _descifrar_col(self, fila: sqlite3.Row, col: str) -> str | None:
@@ -502,6 +585,99 @@ class Almacen:
             self._con.executemany("INSERT OR IGNORE INTO eventos_vistos VALUES (?, ?)",
                                   [(user_id, i) for i in ids])
 
+    @staticmethod
+    def _a_tarea(f: sqlite3.Row) -> Tarea:
+        return Tarea(
+            id=f["id"], user_id=f["user_id"], asignatura=f["asignatura"], clave=f["clave"],
+            descripcion=f["descripcion"], tipo=f["tipo"], estimado_min=f["estimado_min"], estado=f["estado"],
+            inicio_ts=f["inicio_ts"], reanudado_ts=f["reanudado_ts"], acumulado_s=f["acumulado_s"],
+            pausas=f["pausas"], fin_ts=f["fin_ts"], real_s=f["real_s"], cansancio=f["cansancio"],
+            dificultad=f["dificultad"], manual=bool(f["manual"]),
+        )
+
+    def _activa_sin_lock(self, user_id: int) -> Tarea | None:
+        fila = self._con.execute(
+            f"SELECT {_COLS_TAREA} FROM tareas WHERE user_id = ? AND estado IN ('en_curso', 'pausada')",
+            (user_id,),
+        ).fetchone()
+        return self._a_tarea(fila) if fila else None
+
+    def _tarea_activa(self, user_id: int) -> Tarea | None:
+        with self._lock:
+            return self._activa_sin_lock(user_id)
+
+    def _iniciar_tarea(self, user_id, asignatura, clave, descripcion, tipo, estimado_min, ahora):
+        iso = _ahora_iso()
+        with self._lock:
+            try:
+                with self._con:
+                    self._con.execute(
+                        "INSERT OR IGNORE INTO usuarios (user_id, creado, actualizado) VALUES (?, ?, ?)",
+                        (user_id, iso, iso),
+                    )
+                    self._con.execute(
+                        "INSERT INTO tareas (user_id, asignatura, clave, descripcion, tipo, estimado_min, "
+                        "estado, inicio_ts, reanudado_ts) VALUES (?, ?, ?, ?, ?, ?, 'en_curso', ?, ?)",
+                        (user_id, asignatura, clave, descripcion, tipo, estimado_min, ahora, ahora),
+                    )
+            except sqlite3.IntegrityError:  # el índice único: ya hay una tarea activa
+                return None
+            return self._activa_sin_lock(user_id)
+
+    def _pausar_tarea(self, user_id: int, ahora: int) -> Tarea | None:
+        with self._lock, self._con:
+            cur = self._con.execute(
+                "UPDATE tareas SET acumulado_s = acumulado_s + MAX(0, ? - reanudado_ts), reanudado_ts = NULL, "
+                "pausas = pausas + 1, estado = 'pausada' WHERE user_id = ? AND estado = 'en_curso'",
+                (ahora, user_id),
+            )
+            return self._activa_sin_lock(user_id) if cur.rowcount else None
+
+    def _reanudar_tarea(self, user_id: int, ahora: int) -> Tarea | None:
+        with self._lock, self._con:
+            cur = self._con.execute(
+                "UPDATE tareas SET estado = 'en_curso', reanudado_ts = ? WHERE user_id = ? AND estado = 'pausada'",
+                (ahora, user_id),
+            )
+            return self._activa_sin_lock(user_id) if cur.rowcount else None
+
+    def _cerrar_tarea(self, user_id: int, ahora: int, estado: str, minutos_manual: int | None) -> Tarea | None:
+        if estado not in {"terminada", "abandonada"}:
+            raise ValueError(f"Estado de cierre no válido: {estado}")
+        with self._lock, self._con:
+            tarea = self._activa_sin_lock(user_id)
+            if tarea is None:
+                return None
+            real = tarea.transcurrido_s(ahora)
+            manual = 0
+            if minutos_manual is not None:
+                real, manual = minutos_manual * 60, 1
+            self._con.execute(
+                "UPDATE tareas SET estado = ?, fin_ts = ?, real_s = ?, acumulado_s = ?, manual = ?, "
+                "reanudado_ts = NULL WHERE id = ?",
+                (estado, ahora, real, real, manual, tarea.id),
+            )
+            fila = self._con.execute(f"SELECT {_COLS_TAREA} FROM tareas WHERE id = ?", (tarea.id,)).fetchone()
+            return self._a_tarea(fila)
+
+    def _valorar_tarea(self, tarea_id: int, user_id: int, cansancio: int | None, dificultad: int | None) -> bool:
+        with self._lock, self._con:
+            cur = self._con.execute(
+                "UPDATE tareas SET cansancio = COALESCE(?, cansancio), dificultad = COALESCE(?, dificultad) "
+                "WHERE id = ? AND user_id = ? AND estado = 'terminada'",
+                (cansancio, dificultad, tarea_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def _tareas_terminadas(self, user_id: int, limite: int) -> list[Tarea]:
+        with self._lock:
+            filas = self._con.execute(
+                f"SELECT {_COLS_TAREA} FROM tareas WHERE user_id = ? AND estado = 'terminada' "
+                "ORDER BY fin_ts DESC LIMIT ?",
+                (user_id, limite),
+            ).fetchall()
+        return [self._a_tarea(f) for f in filas]
+
 
 async def migrar_propietario(almacen: Almacen, ids_vistos: set[str] | None) -> None:
     """Primer arranque: vuelca la configuración del .env del propietario a la base de datos.
@@ -538,17 +714,21 @@ INSTRUCCION_FORMATO = (
 )
 
 
-def construir_system_prompt(perfil: Perfil, eventos: str, ahora: dt.datetime) -> str:
+def construir_system_prompt(perfil: Perfil, eventos: str, ahora: dt.datetime, habitos: str = "") -> str:
     rutina = perfil.rutina or (
         "(Todavía no ha escrito su rutina. Si te pide un plan, pregúntale por sus horarios "
         "o recuérdale que puede guardarla con `!configurar`.)"
     )
     curso = f"CURSO DEL ESTUDIANTE: {perfil.curso}\n\n" if perfil.curso else ""
+    bloque_habitos = (
+        "\n\nHÁBITOS MEDIDOS DEL ESTUDIANTE (calculados por Zapy con sus tareas reales; úsalos para estimar "
+        f"duraciones y no inventes otros datos):\n{habitos}" if habitos else ""
+    )
     return (
         f"{PERSONA_BASE}\n\n{INSTRUCCION_FORMATO}\n\n{curso}"
         f"PERFIL Y RUTINA DEL ESTUDIANTE:\n{rutina}\n\n"
         f"HOY ES: {DIAS_SEMANA[ahora.weekday()]}, {ahora:%d/%m/%Y}, {ahora:%H:%M}\n\n"
-        f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos}"
+        f"EXÁMENES Y EVENTOS PRÓXIMOS EN NOTION:\n{eventos}{bloque_habitos}"
     )
 
 
@@ -1184,7 +1364,9 @@ async def responder_con_ia(message: discord.Message) -> None:
             else:
                 eventos = "(el usuario no ha conectado su calendario de Notion)"
 
-            system = construir_system_prompt(perfil, eventos, dt.datetime.now(TZ))
+            habitos = resumen_habitos(await bot.almacen.tareas_terminadas(perfil.user_id),
+                                      await bot.almacen.tarea_activa(perfil.user_id), _ahora_ts())
+            system = construir_system_prompt(perfil, eventos, dt.datetime.now(TZ), habitos)
             conversacion = await construir_conversacion(message, texto)
             respuesta = await generar_texto(cliente_gemini(perfil), conversacion, system, MAX_TOKENS_CHAT)
     except ClaveGeminiError:
@@ -1676,7 +1858,7 @@ class ConfirmarBorrado(discord.ui.View):
         invalidar_cache_usuario(self.user_id)
         self.stop()
         await interaction.response.edit_message(
-            content="🗑️ Listo: he borrado tu perfil, tus claves y tus asignaturas. Lo que hay en tu "
+            content="🗑️ Listo: he borrado tu perfil, tus claves, tus asignaturas y tus estadísticas. Lo que hay en tu "
                     "Notion no se ha tocado. Puedes volver a empezar con `!configurar`.",
             view=None,
         )
@@ -1748,9 +1930,490 @@ class PanelConfig(discord.ui.View):
     @discord.ui.button(label="Borrar mis datos", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
     async def boton_borrar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves y tus asignaturas de Zapy.",
+            "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves, tus asignaturas y tus tareas y estadísticas de Zapy.",
             view=ConfirmarBorrado(self.user_id, self), ephemeral=True,
         )
+
+
+# ----------------------------------------------------------------------------
+# PLANIFICADOR: tareas con temporizador y estimaciones que aprenden de ti
+# ----------------------------------------------------------------------------
+MIN_TAREA_S = 120            # menos de 2 min: probablemente un toque accidental
+MAX_TAREA_AUTO_MIN = 240     # más de 4 h contando: seguramente se olvidó parar el temporizador
+MAX_MIN_ESTADISTICAS = 360   # lo que pase de 6 h no cuenta para las estadísticas
+MAX_MIN_MANUAL = 600
+MIN_MUESTRAS_GRUPO = 3       # tareas parecidas necesarias para corregir por asignatura / tipo
+MIN_MUESTRAS_GLOBAL = 5      # tareas necesarias para corregir con todo el historial
+PRIOR_FACTOR = 3             # "tirón" hacia 1: con pocos datos el factor se modera
+
+TIPOS_TAREA = {"practica": "práctica", "teoria": "teoría", "memoria": "memorización",
+               "redaccion": "redacción", "otros": "otras"}
+_PALABRAS_TIPO = (  # el orden importa: la primera coincidencia gana
+    ("practica", ("ejercicio", "problema", "practica", "resolver", "cuestion", "simulacro", "calcul")),
+    ("redaccion", ("redact", "ensayo", "comentario", "escribir", "informe", "trabajo", "composicion")),
+    ("memoria", ("memoriz", "aprender", "vocabulario", "repaso", "repasar", "flashcard", "ficha", "formula")),
+    ("teoria", ("leer", "lectura", "teoria", "apuntes", "resumen", "esquema", "entender", "video")),
+)
+
+MSG_SIN_TAREA = "No tienes ninguna tarea en curso. Empieza una con `!empezar Asignatura | Tarea`."
+MSG_USO_EMPEZAR = (
+    "⚠️ Usa: `!empezar Asignatura | Tarea | minutos que estimas` (la tarea y los minutos son opcionales).\n"
+    "Ejemplos: `!empezar Mates | ejercicios del tema 3 | 45` · `!empezar Inglés`"
+)
+MSG_VALORAR = "\n\nUn toque y Zapy aprende de ti: ¿cómo ha ido?"
+
+
+def inferir_tipo(descripcion: str) -> str:
+    texto = _norm(descripcion)
+    for tipo, palabras in _PALABRAS_TIPO:
+        if any(palabra in texto for palabra in palabras):
+            return tipo
+    return "otros"
+
+
+def fmt_duracion(segundos: float) -> str:
+    s = max(0, int(round(segundos)))
+    if s < 60:
+        return f"{s} s"
+    minutos = s // 60
+    if minutos < 60:
+        return f"{minutos} min"
+    horas, minutos = divmod(minutos, 60)
+    return f"{horas} h {minutos:02d} min"
+
+
+def _ahora_ts() -> int:
+    return int(time.time())
+
+
+# --- Estimaciones (código, no IA: Gemini solo recibe el resultado) ---------------
+def cuenta_en_estadisticas(t: Tarea) -> bool:
+    return (t.estado == "terminada" and t.real_s is not None
+            and MIN_TAREA_S <= t.real_s <= MAX_MIN_ESTADISTICAS * 60)
+
+
+def _ratios(tareas: list[Tarea]) -> list[float]:
+    """real / estimado de cada tarea con estimación, acotado para que un caso raro no domine."""
+    return [min(5.0, max(0.2, (t.real_s / 60) / t.estimado_min)) for t in tareas if t.estimado_min]
+
+
+def factor_correccion(ratios: list[float]) -> float:
+    """Media geométrica de real/estimado, moderada hacia 1 cuando hay pocos datos."""
+    if not ratios:
+        return 1.0
+    return math.exp(sum(math.log(r) for r in ratios) / (len(ratios) + PRIOR_FACTOR))
+
+
+def _percentil(valores: list[float], p: float) -> float:
+    v = sorted(valores)
+    k = (len(v) - 1) * p / 100
+    i = int(k)
+    j = min(i + 1, len(v) - 1)
+    return v[i] + (v[j] - v[i]) * (k - i)
+
+
+@dataclass(frozen=True)
+class Estimacion:
+    minutos: int
+    bajo: int
+    alto: int
+    muestras: int   # tareas con estimación en las que se basa (0 = sin datos suficientes)
+    base: str
+    factor: float
+
+
+def estimar(tareas: list[Tarea], clave: str, tipo: str, estimado_min: int) -> Estimacion:
+    """Corrige la estimación del usuario con su historial: primero tareas de la misma asignatura y
+    tipo, luego la asignatura y, por último, todo su historial."""
+    validas = [t for t in tareas if cuenta_en_estadisticas(t) and t.estimado_min]
+    niveles = (
+        ("tu asignatura y tipo de tarea", [t for t in validas if t.clave == clave and t.tipo == tipo], MIN_MUESTRAS_GRUPO),
+        ("tu asignatura", [t for t in validas if t.clave == clave], MIN_MUESTRAS_GRUPO),
+        ("todas tus tareas", validas, MIN_MUESTRAS_GLOBAL),
+    )
+    for base, grupo, minimo in niveles:
+        if len(grupo) < minimo:
+            continue
+        ratios = _ratios(grupo)
+        factor = factor_correccion(ratios)
+        centro = estimado_min * factor
+        if len(ratios) >= 4:
+            bajo, alto = estimado_min * _percentil(ratios, 25), estimado_min * _percentil(ratios, 75)
+        else:
+            bajo, alto = centro * 0.8, centro * 1.25
+        bajo, alto = min(bajo, centro), max(alto, centro)
+        return Estimacion(max(1, round(centro)), max(1, round(bajo)), max(1, round(alto)), len(ratios), base, factor)
+    return Estimacion(estimado_min, estimado_min, estimado_min, 0, "sin datos suficientes", 1.0)
+
+
+def duracion_tipica(tareas: list[Tarea], clave: str, tipo: str) -> tuple[int, int, str] | None:
+    """Mediana de lo que tarda en tareas parecidas (minutos, nº de tareas, base), si hay datos."""
+    validas = [t for t in tareas if cuenta_en_estadisticas(t)]
+    for base, grupo in (("tu asignatura y tipo de tarea", [t for t in validas if t.clave == clave and t.tipo == tipo]),
+                        ("tu asignatura", [t for t in validas if t.clave == clave])):
+        if len(grupo) >= MIN_MUESTRAS_GRUPO:
+            return round(_percentil([t.real_s / 60 for t in grupo], 50)), len(grupo), base
+    return None
+
+
+def _agrupar_por_clave(tareas: list[Tarea]) -> dict[str, list[Tarea]]:
+    grupos: dict[str, list[Tarea]] = {}
+    for t in tareas:  # llegan de más reciente a más antigua
+        grupos.setdefault(t.clave, []).append(t)
+    return grupos
+
+
+def resumen_habitos(tareas: list[Tarea], activa: Tarea | None, ahora: int) -> str:
+    """Texto breve con los hábitos MEDIDOS del usuario, para el prompt de Gemini."""
+    lineas: list[str] = []
+    if activa is not None:
+        estado = "en pausa" if activa.estado == "pausada" else "contando"
+        lineas.append(f"TAREA EN CURSO: {activa.asignatura}"
+                      + (f" ({activa.descripcion})" if activa.descripcion else "")
+                      + f", {estado}, {fmt_duracion(activa.transcurrido_s(ahora))} hechos.")
+    validas = [t for t in tareas if cuenta_en_estadisticas(t)]
+    if len(validas) < MIN_MUESTRAS_GLOBAL:
+        lineas.append("Aún hay pocas tareas medidas: no prometas duraciones exactas y recuérdale que tus "
+                      "estimaciones mejoran al registrar sus tareas con `!empezar` y `!terminar`.")
+        return "\n".join(lineas)
+    ratios = _ratios(validas)
+    if len(ratios) >= MIN_MUESTRAS_GLOBAL:
+        lineas.append(f"En conjunto tarda ×{factor_correccion(ratios):.2f} lo que estima ({len(ratios)} tareas con estimación).")
+    grupos = sorted(_agrupar_por_clave(validas).values(), key=len, reverse=True)[:6]
+    for grupo in grupos:
+        mediana = round(_percentil([t.real_s / 60 for t in grupo], 50))
+        linea = f"- {grupo[0].asignatura}: {len(grupo)} tareas, mediana {mediana} min"
+        r = _ratios(grupo)
+        if len(r) >= MIN_MUESTRAS_GRUPO:
+            linea += f", suele tardar ×{factor_correccion(r):.2f} lo que estima"
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
+def texto_estimacion(tareas: list[Tarea], t: Tarea) -> str:
+    """Lo que Zapy le dice al empezar una tarea, según lo que ya sabe de él."""
+    if t.estimado_min:
+        est = estimar(tareas, t.clave, t.tipo, t.estimado_min)
+        if est.muestras >= MIN_MUESTRAS_GRUPO:
+            return (f"📊 Estimas {t.estimado_min} min; en tareas como esta sueles tardar ~{est.minutos} min "
+                    f"(entre {est.bajo} y {est.alto}), según {est.muestras} tareas de {est.base}.")
+        return "📊 Estimación anotada. Con unas cuantas tareas registradas te diré cuánto sueles tardar de verdad."
+    tipica = duracion_tipica(tareas, t.clave, t.tipo)
+    if tipica:
+        minutos, n, base = tipica
+        return f"⏳ En tareas como esta sueles tardar ~{minutos} min ({n} tareas de {base})."
+    return ""
+
+
+# --- Temporizador: lógica compartida por comandos y botones ----------------------------
+_RE_MINUTOS = re.compile(r"^\s*(\d{1,3})\s*(?:min|mins|m|minutos)?\s*$", re.IGNORECASE)
+
+
+def _parsear_minutos(texto: str) -> int | None:
+    coincidencia = _RE_MINUTOS.match(texto or "")
+    return int(coincidencia[1]) if coincidencia else None
+
+
+def parsear_empezar(args: str) -> tuple[str, str, int | None] | None:
+    """'Mates | ejercicios | 45' -> (asignatura, descripción, minutos estimados); None si no se entiende."""
+    partes = [x.strip() for x in args.split("|")]
+    asignatura = partes[0][:60]
+    if not asignatura:
+        return None
+    descripcion, estimado = "", None
+    if len(partes) == 2:
+        solo_minutos = _parsear_minutos(partes[1])
+        if solo_minutos is not None:
+            estimado = solo_minutos
+        else:
+            descripcion = partes[1][:200]
+    elif len(partes) >= 3:
+        descripcion = partes[1][:200]
+        if partes[2]:
+            estimado = _parsear_minutos(partes[2])
+            if estimado is None:
+                return None
+    if estimado is not None and not 1 <= estimado <= MAX_MIN_MANUAL:
+        return None
+    return asignatura, descripcion, estimado
+
+
+async def tarea_empezar(user_id: int, args: str) -> tuple[Tarea | None, str]:
+    datos = parsear_empezar(args)
+    if datos is None:
+        return None, MSG_USO_EMPEZAR
+    asignatura, descripcion, estimado = datos
+    clave = (alias_equivalentes(asignatura) or [asignatura.lower()])[0]
+    tarea = await bot.almacen.iniciar_tarea(
+        user_id, asignatura, clave, descripcion, inferir_tipo(descripcion), estimado, _ahora_ts()
+    )
+    if tarea is None:
+        activa = await bot.almacen.tarea_activa(user_id)
+        estado = "en pausa" if activa and activa.estado == "pausada" else "en curso"
+        nombre = f" (**{activa.asignatura}**)" if activa else ""
+        return None, (f"⚠️ Ya tienes una tarea {estado}{nombre}. Termínala con `!terminar`, "
+                      "déjala con `!abandonar` o mira cómo va con `!tarea`.")
+    return tarea, texto_estimacion(await bot.almacen.tareas_terminadas(user_id), tarea)
+
+
+async def tarea_pausar(user_id: int) -> str:
+    t = await bot.almacen.pausar_tarea(user_id, _ahora_ts())
+    if t is not None:
+        return f"⏸️ En pausa. Llevas {fmt_duracion(t.acumulado_s)} contados; el tiempo parado no cuenta. Sigue con `!reanudar`."
+    activa = await bot.almacen.tarea_activa(user_id)
+    return MSG_SIN_TAREA if activa is None else "⏸️ Ya estaba en pausa. Sigue con `!reanudar`."
+
+
+async def tarea_reanudar(user_id: int) -> str:
+    t = await bot.almacen.reanudar_tarea(user_id, _ahora_ts())
+    if t is not None:
+        return f"▶️ Reanudada. Llevas {fmt_duracion(t.acumulado_s)} contados hasta ahora."
+    activa = await bot.almacen.tarea_activa(user_id)
+    return MSG_SIN_TAREA if activa is None else "▶️ Ya estaba en marcha."
+
+
+async def tarea_abandonar(user_id: int) -> str:
+    t = await bot.almacen.cerrar_tarea(user_id, _ahora_ts(), "abandonada")
+    if t is None:
+        return MSG_SIN_TAREA
+    return f"❌ Tarea **{t.asignatura}** abandonada. No cuenta para tus estadísticas."
+
+
+async def tarea_terminar(user_id: int, minutos: int | None) -> tuple[Tarea | None, str]:
+    activa = await bot.almacen.tarea_activa(user_id)
+    if activa is None:
+        return None, MSG_SIN_TAREA
+    ahora = _ahora_ts()
+    if minutos is None and activa.transcurrido_s(ahora) > MAX_TAREA_AUTO_MIN * 60:
+        return None, (f"⚠️ Llevas {fmt_duracion(activa.transcurrido_s(ahora))} contando: parece que se te olvidó "
+                      "parar el temporizador. Dime cuánto fue de verdad, por ejemplo `!terminar 90` (minutos), "
+                      "o descártala con `!abandonar`.")
+    t = await bot.almacen.cerrar_tarea(user_id, ahora, "terminada", minutos)
+    if t is None:
+        return None, MSG_SIN_TAREA
+    partes = [f"✅ **{t.asignatura}** terminada: **{fmt_duracion(t.real_s)}**"
+              + (" (tiempo puesto a mano)" if t.manual else "") + "."]
+    if t.pausas:
+        partes.append(f"Con {t.pausas} pausa{'s' if t.pausas != 1 else ''}, que no se han contado.")
+    if t.estimado_min:
+        ratio = (t.real_s / 60) / t.estimado_min
+        if ratio > 1.15:
+            partes.append(f"Estimabas {t.estimado_min} min: has tardado un {round((ratio - 1) * 100)}% más.")
+        elif ratio < 0.87:
+            partes.append(f"Estimabas {t.estimado_min} min: has tardado un {round((1 - ratio) * 100)}% menos.")
+        else:
+            partes.append(f"Estimabas {t.estimado_min} min: casi clavado.")
+    if t.real_s < MIN_TAREA_S:
+        partes.append("Ha sido muy corta, así que no cuenta para tus estadísticas.")
+    elif t.real_s > MAX_MIN_ESTADISTICAS * 60:
+        partes.append("Es demasiado larga para contar en tus estadísticas.")
+    return t, " ".join(partes)
+
+
+# --- Paneles y botones ------------------------------------------------------------------------
+_paneles_tarea: dict[int, "TareaView"] = {}  # el último panel abierto de cada usuario, para mantenerlo al día
+
+
+def embed_tarea(t: Tarea, ahora: int, nota: str = "") -> discord.Embed:
+    en_curso = t.estado == "en_curso"
+    descripcion = (nota + "\n\n" if nota else "") + "Botones o `!pausar` · `!reanudar` · `!terminar`."
+    embed = discord.Embed(
+        title="⏱️ Tarea en curso" if en_curso else "⏸️ Tarea en pausa",
+        description=descripcion,
+        color=discord.Color.green() if en_curso else discord.Color.blue(),
+    )
+    embed.add_field(name="📚 Tarea", value=(f"**{t.asignatura}**" + (f" · {t.descripcion}" if t.descripcion else ""))[:1000], inline=False)
+    if en_curso:  # marca de Discord que se actualiza sola: "hace 12 minutos" sin tener que editar el mensaje
+        embed.add_field(name="⏱️ Contando desde", value=f"<t:{ahora - t.transcurrido_s(ahora)}:R>", inline=True)
+    else:
+        embed.add_field(name="⏸️ Contado", value=fmt_duracion(t.acumulado_s), inline=True)
+    if t.estimado_min:
+        embed.add_field(name="🎯 Estimado", value=f"{t.estimado_min} min", inline=True)
+    if t.pausas:
+        embed.add_field(name="Pausas", value=str(t.pausas), inline=True)
+    return embed
+
+
+async def refrescar_panel_tarea(user_id: int, nota: str = "") -> None:
+    """Pone al día el panel abierto del usuario (o lo cierra si ya no tiene tarea activa)."""
+    vista = _paneles_tarea.get(user_id)
+    if vista is None or vista.mensaje is None:
+        return
+    activa = await bot.almacen.tarea_activa(user_id)
+    try:
+        if activa is not None:
+            await vista.mensaje.edit(embed=embed_tarea(activa, _ahora_ts(), nota), view=vista)
+        else:
+            _paneles_tarea.pop(user_id, None)
+            await vista.mensaje.edit(content=nota or "Tarea cerrada.", embed=None, view=None)
+    except discord.HTTPException:
+        pass
+
+
+class ValoracionView(discord.ui.View):
+    """Dos selectores de un toque tras terminar: cansancio y dificultad. Cada respuesta se guarda al instante."""
+
+    def __init__(self, tarea_id: int, user_id: int, contenido: str):
+        super().__init__(timeout=900)
+        self.tarea_id, self.user_id, self.contenido = tarea_id, user_id, contenido
+        self.hecho: set[str] = set()
+        self.mensaje: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    async def _guardar(self, interaction: discord.Interaction, campo: str, valor: int) -> None:
+        await bot.almacen.valorar_tarea(self.tarea_id, self.user_id, **{campo: valor})
+        self.hecho.add(campo)
+        if len(self.hecho) == 2:
+            self.stop()
+            await interaction.response.edit_message(content=self.contenido + "\n\n✅ Anotado, gracias.", view=None)
+        else:
+            await interaction.response.defer()
+
+    async def on_timeout(self) -> None:
+        if self.mensaje is not None:
+            try:
+                await self.mensaje.edit(content=self.contenido, view=None)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.select(placeholder="¿Cómo de cansado/a estabas?", row=0, options=[
+        discord.SelectOption(label="1 · Nada cansado/a", value="1"),
+        discord.SelectOption(label="2 · Algo cansado/a", value="2"),
+        discord.SelectOption(label="3 · Normal", value="3"),
+        discord.SelectOption(label="4 · Bastante cansado/a", value="4"),
+        discord.SelectOption(label="5 · Agotado/a", value="5"),
+    ])
+    async def selector_cansancio(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await self._guardar(interaction, "cansancio", int(select.values[0]))
+
+    @discord.ui.select(placeholder="¿Qué tal de difícil fue?", row=1, options=[
+        discord.SelectOption(label="1 · Muy fácil", value="1"),
+        discord.SelectOption(label="2 · Fácil", value="2"),
+        discord.SelectOption(label="3 · Normal", value="3"),
+        discord.SelectOption(label="4 · Difícil", value="4"),
+        discord.SelectOption(label="5 · Muy difícil", value="5"),
+    ])
+    async def selector_dificultad(self, interaction: discord.Interaction, select: discord.ui.Select):
+        await self._guardar(interaction, "dificultad", int(select.values[0]))
+
+
+class TareaView(discord.ui.View):
+    """Botones de la tarea en curso. El estado vive en la base de datos: los comandos siempre funcionan."""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=12 * 3600)
+        self.user_id = user_id
+        self.mensaje: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Esta tarea es de otra persona. Usa `!empezar` para la tuya.", ephemeral=True)
+            return False
+        return True
+
+    async def _preparar(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if interaction.message is not None:
+            self.mensaje = interaction.message
+        _paneles_tarea[self.user_id] = self
+
+    async def on_timeout(self) -> None:
+        _paneles_tarea.pop(self.user_id, None)
+        for item in self.children:
+            item.disabled = True
+        if self.mensaje is not None:
+            try:
+                await self.mensaje.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        log.error("Error en el panel de tarea", exc_info=error)
+        await _avisar(interaction, "❌ Algo ha fallado. Prueba con `!tarea`.")
+
+    @discord.ui.button(label="Pausar", emoji="⏸️", style=discord.ButtonStyle.secondary, row=0)
+    async def boton_pausar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._preparar(interaction)
+        await refrescar_panel_tarea(self.user_id, await tarea_pausar(self.user_id))
+
+    @discord.ui.button(label="Reanudar", emoji="▶️", style=discord.ButtonStyle.primary, row=0)
+    async def boton_reanudar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._preparar(interaction)
+        await refrescar_panel_tarea(self.user_id, await tarea_reanudar(self.user_id))
+
+    @discord.ui.button(label="Terminar", emoji="✅", style=discord.ButtonStyle.success, row=0)
+    async def boton_terminar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._preparar(interaction)
+        tarea, texto = await tarea_terminar(self.user_id, None)
+        if tarea is None:
+            await interaction.followup.send(texto, ephemeral=True)
+            return
+        _paneles_tarea.pop(self.user_id, None)
+        vista = ValoracionView(tarea.id, self.user_id, texto)
+        vista.mensaje = self.mensaje
+        if self.mensaje is not None:
+            await self.mensaje.edit(content=texto + MSG_VALORAR, embed=None, view=vista)
+
+    @discord.ui.button(label="Abandonar", emoji="❌", style=discord.ButtonStyle.danger, row=0)
+    async def boton_abandonar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._preparar(interaction)
+        await refrescar_panel_tarea(self.user_id, await tarea_abandonar(self.user_id))
+
+
+# --- Estadísticas ------------------------------------------------------------------------------
+def embed_estadisticas(tareas: list[Tarea]) -> discord.Embed:
+    validas = [t for t in tareas if cuenta_en_estadisticas(t)]
+    if not validas:
+        return discord.Embed(
+            title="📊 Tus estadísticas de estudio", color=discord.Color.blue(),
+            description="Aún no tienes tareas completadas. Empieza una con `!empezar Mates | ejercicios | 45`, "
+                        "ciérrala con `!terminar` y Zapy irá aprendiendo cuánto tardas de verdad.",
+        )
+    ratios = _ratios(validas)
+    descripcion = f"**{len(validas)}** tareas · **{fmt_duracion(sum(t.real_s for t in validas))}** en total."
+    if len(validas) < MIN_MUESTRAS_GLOBAL:
+        descripcion += "\nTodavía son pocos datos: las estimaciones serán más finas con el uso."
+    embed = discord.Embed(title="📊 Tus estadísticas de estudio", description=descripcion, color=discord.Color.blue())
+    if len(ratios) >= MIN_MUESTRAS_GLOBAL:
+        f = factor_correccion(ratios)
+        veredicto = ("sueles tardar más de lo que estimas" if f > 1.15
+                     else "sueles terminar antes de lo estimado" if f < 0.87 else "tus estimaciones son bastante buenas")
+        embed.add_field(name="🎯 Tus estimaciones", value=f"×{f:.2f}: {veredicto} ({len(ratios)} tareas con estimación).", inline=False)
+    lineas = []
+    for grupo in sorted(_agrupar_por_clave(validas).values(), key=len, reverse=True)[:8]:
+        mediana = round(_percentil([t.real_s / 60 for t in grupo], 50))
+        linea = f"**{grupo[0].asignatura}** · {len(grupo)} tareas · mediana {mediana} min"
+        r = _ratios(grupo)
+        if len(r) >= MIN_MUESTRAS_GRUPO:
+            linea += f" · ×{factor_correccion(r):.2f}"
+        lineas.append(linea)
+    embed.add_field(name="📖 Por asignatura", value="\n".join(lineas)[:1000], inline=False)
+    cansancios = [t.cansancio for t in validas if t.cansancio]
+    dificultades = [t.dificultad for t in validas if t.dificultad]
+    if len(cansancios) >= 3:
+        embed.add_field(name="😴 Cansancio y dificultad",
+                        value=f"Cansancio medio {sum(cansancios) / len(cansancios):.1f}/5"
+                              + (f" · dificultad media {sum(dificultades) / len(dificultades):.1f}/5" if len(dificultades) >= 3 else ""),
+                        inline=False)
+    return embed
+
+
+async def enviar_privado(ctx: commands.Context, **kwargs):
+    """Tus hábitos de estudio son personales: van por mensaje privado y, si no se puede, al canal."""
+    try:
+        mensaje = await ctx.author.send(**kwargs)
+    except discord.Forbidden:
+        return await ctx.send(**kwargs)
+    if not isinstance(ctx.channel, discord.DMChannel):
+        origen = getattr(ctx, "message", None)
+        if origen is not None:
+            try:
+                await origen.add_reaction("📩")
+            except discord.HTTPException:
+                pass
+    return mensaje
 
 
 # ----------------------------------------------------------------------------
@@ -1760,6 +2423,14 @@ class PanelConfig(discord.ui.View):
 async def mostrar_comandos(ctx: commands.Context):
     embed = discord.Embed(title="🤖 Comandos de Zapy", color=discord.Color.blue())
     embed.add_field(name="⚙️ Configurar", value="`!configurar` - Tu clave de Gemini, tu rutina y tu Notion.", inline=False)
+    embed.add_field(
+        name="⏱️ Planificador",
+        value=("`!empezar Mates | ejercicios | 45` - Empieza una tarea y el temporizador.\n"
+               "`!pausar` / `!reanudar` - Si te interrumpen (la pausa no cuenta).\n"
+               "`!terminar` (o `!terminar 45`) - Cierra la tarea. `!abandonar` la descarta.\n"
+               "`!tarea` - Ver la tarea en curso. `!estadisticas` - Cuánto tardas de verdad."),
+        inline=False,
+    )
     embed.add_field(name="📅 Notion", value="`!eventos` - Lista los próximos exámenes/tareas.", inline=False)
     embed.add_field(name="➕ Añadir", value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.", inline=False)
     embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Genera apuntes en Notion.", inline=False)
@@ -1791,9 +2462,81 @@ async def configurar(ctx: commands.Context):
 @commands.cooldown(1, 10, commands.BucketType.user)
 async def borrar_mis_datos(ctx: commands.Context):
     await ctx.send(
-        "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves y tus asignaturas de Zapy.",
+        "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves, tus asignaturas y tus tareas y estadísticas de Zapy.",
         view=ConfirmarBorrado(ctx.author.id),
     )
+
+
+@bot.command(name="empezar")
+@commands.cooldown(2, 5, commands.BucketType.user)
+async def empezar_tarea(ctx: commands.Context, *, args: str = ""):
+    tarea, nota = await tarea_empezar(ctx.author.id, args)
+    if tarea is None:
+        await enviar_privado(ctx, content=nota)
+        return
+    vista = TareaView(ctx.author.id)
+    vista.mensaje = await enviar_privado(ctx, embed=embed_tarea(tarea, _ahora_ts(), nota), view=vista)
+    _paneles_tarea[ctx.author.id] = vista
+
+
+@bot.command(name="tarea")
+@commands.cooldown(2, 5, commands.BucketType.user)
+async def ver_tarea(ctx: commands.Context):
+    activa = await bot.almacen.tarea_activa(ctx.author.id)
+    if activa is None:
+        await enviar_privado(ctx, content=MSG_SIN_TAREA)
+        return
+    vista = TareaView(ctx.author.id)
+    vista.mensaje = await enviar_privado(ctx, embed=embed_tarea(activa, _ahora_ts()), view=vista)
+    _paneles_tarea[ctx.author.id] = vista
+
+
+@bot.command(name="pausar", aliases=["pausa"])
+@commands.cooldown(3, 5, commands.BucketType.user)
+async def pausar_tarea(ctx: commands.Context):
+    texto = await tarea_pausar(ctx.author.id)
+    await enviar_privado(ctx, content=texto)
+    await refrescar_panel_tarea(ctx.author.id, texto)
+
+
+@bot.command(name="reanudar", aliases=["continuar", "seguir"])
+@commands.cooldown(3, 5, commands.BucketType.user)
+async def reanudar_tarea(ctx: commands.Context):
+    texto = await tarea_reanudar(ctx.author.id)
+    await enviar_privado(ctx, content=texto)
+    await refrescar_panel_tarea(ctx.author.id, texto)
+
+
+@bot.command(name="terminar", aliases=["fin", "acabar"])
+@commands.cooldown(2, 5, commands.BucketType.user)
+async def terminar_tarea(ctx: commands.Context, *, args: str = ""):
+    minutos = None
+    if args.strip():
+        minutos = _parsear_minutos(args)
+        if minutos is None or not 1 <= minutos <= MAX_MIN_MANUAL:
+            await enviar_privado(ctx, content="⚠️ Usa `!terminar` o, para poner el tiempo a mano, `!terminar 45` (minutos).")
+            return
+    tarea, texto = await tarea_terminar(ctx.author.id, minutos)
+    if tarea is None:
+        await enviar_privado(ctx, content=texto)
+        return
+    vista = ValoracionView(tarea.id, ctx.author.id, texto)
+    vista.mensaje = await enviar_privado(ctx, content=texto + MSG_VALORAR, view=vista)
+    await refrescar_panel_tarea(ctx.author.id, "✅ Tarea terminada.")
+
+
+@bot.command(name="abandonar")
+@commands.cooldown(2, 5, commands.BucketType.user)
+async def abandonar_tarea(ctx: commands.Context):
+    texto = await tarea_abandonar(ctx.author.id)
+    await enviar_privado(ctx, content=texto)
+    await refrescar_panel_tarea(ctx.author.id, texto)
+
+
+@bot.command(name="estadisticas", aliases=["stats", "estadísticas"])
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def ver_estadisticas(ctx: commands.Context):
+    await enviar_privado(ctx, embed=embed_estadisticas(await bot.almacen.tareas_terminadas(ctx.author.id)))
 
 
 @bot.command(name="clear")
