@@ -428,6 +428,8 @@ class Almacen:
         self._con.row_factory = sqlite3.Row
         with self._lock:
             self._con.execute("PRAGMA journal_mode=WAL")
+            self._con.execute("PRAGMA synchronous=NORMAL")  # seguro con WAL; menos esperas en la SD
+            self._con.execute("PRAGMA busy_timeout=5000")
             self._con.execute("PRAGMA foreign_keys=ON")
             self._con.executescript(self._ESQUEMA)
 
@@ -1364,7 +1366,7 @@ async def responder_con_ia(message: discord.Message) -> None:
             else:
                 eventos = "(el usuario no ha conectado su calendario de Notion)"
 
-            habitos = resumen_habitos(await bot.almacen.tareas_terminadas(perfil.user_id),
+            habitos = resumen_habitos(await bot.almacen.tareas_terminadas(perfil.user_id, TAREAS_PARA_PROMPT),
                                       await bot.almacen.tarea_activa(perfil.user_id), _ahora_ts())
             system = construir_system_prompt(perfil, eventos, dt.datetime.now(TZ), habitos)
             conversacion = await construir_conversacion(message, texto)
@@ -1439,6 +1441,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 # CONFIGURACIÓN POR USUARIO (!configurar: panel con botones y formularios)
 # ----------------------------------------------------------------------------
 MAX_ASIGNATURAS = 15
+MSG_CONFIRMAR_BORRADO = ("¿Seguro? Se borrarán tu perfil, tu rutina, tus claves, tus asignaturas y tus "
+                         "tareas y estadísticas de Zapy.")
 URL_CLAVE_GEMINI = "https://aistudio.google.com/apikey"
 URL_INTEGRACIONES_NOTION = "https://www.notion.so/my-integrations"
 
@@ -1600,6 +1604,16 @@ def embed_panel(perfil: Perfil | None) -> discord.Embed:
     return embed
 
 
+async def _editar_seguro(mensaje: discord.Message | None, **cambios) -> None:
+    """Edita un mensaje del bot; si ya no existe o Discord lo rechaza, se ignora."""
+    if mensaje is None:
+        return
+    try:
+        await mensaje.edit(**cambios)
+    except discord.HTTPException:
+        pass
+
+
 async def _avisar(interaction: discord.Interaction, texto: str) -> None:
     """Respuesta privada (solo la ve quien pulsó), antes o después de un defer."""
     if interaction.response.is_done():
@@ -1666,17 +1680,35 @@ class ModalPerfil(_ModalBase):
         await self.vista.refrescar()
 
 
+def _campo_token(perfil: Perfil | None) -> discord.ui.TextInput:
+    tiene = bool(perfil and perfil.notion_token)
+    return discord.ui.TextInput(
+        label="Token de tu integración de Notion",
+        placeholder="Vacío = mantener el actual" if tiene else "ntn_... (o secret_...)",
+        required=not tiene, max_length=300,
+    )
+
+
+async def _notion_validado(interaction: discord.Interaction, escrito: str, perfil: Perfil | None):
+    """(token, cliente) si el token funciona (el escrito o, vacío, el ya guardado); si no, avisa y devuelve None."""
+    token = escrito.strip() or (perfil.notion_token if perfil else None)
+    if not token:
+        await _avisar(interaction, "❌ Necesito el token de tu integración de Notion.")
+        return None
+    notion = Notion(token, bot.session)
+    motivo = await comprobar_token_notion(notion)
+    if motivo:
+        await _avisar(interaction, f"❌ {motivo[0].upper() + motivo[1:]}. Mira el botón ❓ Ayuda.")
+        return None
+    return token, notion
+
+
 class ModalNotion(_ModalBase):
     """Conectar Notion pegando los enlaces de bases de datos que el usuario ya tiene."""
 
     def __init__(self, vista: "PanelConfig", perfil: Perfil | None):
         super().__init__(vista, "Conectar tu Notion")
-        self.tiene_token = bool(perfil and perfil.notion_token)
-        self.token = discord.ui.TextInput(
-            label="Token de tu integración de Notion",
-            placeholder="Vacío = mantener el actual" if self.tiene_token else "ntn_... (o secret_...)",
-            required=not self.tiene_token, max_length=300,
-        )
+        self.token = _campo_token(perfil)
         self.calendario = discord.ui.TextInput(
             label="Enlace de tu calendario de exámenes",
             placeholder="https://www.notion.so/...", required=False, max_length=300,
@@ -1695,15 +1727,10 @@ class ModalNotion(_ModalBase):
         await interaction.response.defer(ephemeral=True, thinking=True)
         uid = interaction.user.id
         perfil = await bot.almacen.obtener_perfil(uid)
-        token = self.token.value.strip() or (perfil.notion_token if perfil else None)
-        if not token:
-            await _avisar(interaction, "❌ Necesito el token de tu integración de Notion.")
+        validado = await _notion_validado(interaction, self.token.value, perfil)
+        if validado is None:
             return
-        notion = Notion(token, bot.session)
-        motivo = await comprobar_token_notion(notion)
-        if motivo:
-            await _avisar(interaction, f"❌ {motivo[0].upper() + motivo[1:]}. Mira el botón ❓ Ayuda.")
-            return
+        token, notion = validado
 
         cambios: dict[str, str] = {"notion_token": token}
         informe = ["✅ Token de Notion comprobado."]
@@ -1759,12 +1786,7 @@ class ModalNotionAuto(_ModalBase):
 
     def __init__(self, vista: "PanelConfig", perfil: Perfil | None):
         super().__init__(vista, "Crear mi Notion automáticamente")
-        self.tiene_token = bool(perfil and perfil.notion_token)
-        self.token = discord.ui.TextInput(
-            label="Token de tu integración de Notion",
-            placeholder="Vacío = mantener el actual" if self.tiene_token else "ntn_... (o secret_...)",
-            required=not self.tiene_token, max_length=300,
-        )
+        self.token = _campo_token(perfil)
         self.pagina = discord.ui.TextInput(
             label="Enlace de una página tuya (compartida)",
             placeholder="https://www.notion.so/... (la integración debe estar conectada)", max_length=300,
@@ -1780,10 +1802,6 @@ class ModalNotionAuto(_ModalBase):
         await interaction.response.defer(ephemeral=True, thinking=True)
         uid = interaction.user.id
         perfil = await bot.almacen.obtener_perfil(uid)
-        token = self.token.value.strip() or (perfil.notion_token if perfil else None)
-        if not token:
-            await _avisar(interaction, "❌ Necesito el token de tu integración de Notion.")
-            return
 
         nombres: dict[str, str] = {}  # alias normalizado -> nombre tal como lo escribió
         for linea in self.asignaturas.value.splitlines():
@@ -1798,11 +1816,10 @@ class ModalNotionAuto(_ModalBase):
             await _avisar(interaction, "❌ No encuentro un enlace de página de Notion válido.")
             return
 
-        notion = Notion(token, bot.session)
-        motivo = await comprobar_token_notion(notion)
-        if motivo:
-            await _avisar(interaction, f"❌ {motivo[0].upper() + motivo[1:]}. Mira el botón ❓ Ayuda.")
+        validado = await _notion_validado(interaction, self.token.value, perfil)  # tras las comprobaciones locales
+        if validado is None:
             return
+        token, notion = validado
         motivo = await comprobar_acceso_notion(notion, f"pages/{padre}")
         if motivo:
             await _avisar(interaction, f"❌ Esa página: {motivo}.")
@@ -1889,19 +1906,12 @@ class PanelConfig(discord.ui.View):
         if self.mensaje is None:
             return
         perfil = await bot.almacen.obtener_perfil(self.user_id)
-        try:
-            await self.mensaje.edit(embed=embed_panel(perfil), view=self)
-        except discord.HTTPException:
-            pass
+        await _editar_seguro(self.mensaje, embed=embed_panel(perfil), view=self)
 
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
-        if self.mensaje is not None:
-            try:
-                await self.mensaje.edit(view=self)
-            except discord.HTTPException:
-                pass
+        await _editar_seguro(self.mensaje, view=self)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         log.error("Error en el panel de configuración", exc_info=error)
@@ -1930,7 +1940,7 @@ class PanelConfig(discord.ui.View):
     @discord.ui.button(label="Borrar mis datos", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
     async def boton_borrar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves, tus asignaturas y tus tareas y estadísticas de Zapy.",
+            MSG_CONFIRMAR_BORRADO,
             view=ConfirmarBorrado(self.user_id, self), ephemeral=True,
         )
 
@@ -1938,6 +1948,7 @@ class PanelConfig(discord.ui.View):
 # ----------------------------------------------------------------------------
 # PLANIFICADOR: tareas con temporizador y estimaciones que aprenden de ti
 # ----------------------------------------------------------------------------
+TAREAS_PARA_PROMPT = 300      # las más recientes bastan para el resumen y acotan el coste de cada mensaje
 MIN_TAREA_S = 120            # menos de 2 min: probablemente un toque accidental
 MAX_TAREA_AUTO_MIN = 240     # más de 4 h contando: seguramente se olvidó parar el temporizador
 MAX_MIN_ESTADISTICAS = 360   # lo que pase de 6 h no cuenta para las estadísticas
@@ -1946,8 +1957,6 @@ MIN_MUESTRAS_GRUPO = 3       # tareas parecidas necesarias para corregir por asi
 MIN_MUESTRAS_GLOBAL = 5      # tareas necesarias para corregir con todo el historial
 PRIOR_FACTOR = 3             # "tirón" hacia 1: con pocos datos el factor se modera
 
-TIPOS_TAREA = {"practica": "práctica", "teoria": "teoría", "memoria": "memorización",
-               "redaccion": "redacción", "otros": "otras"}
 _PALABRAS_TIPO = (  # el orden importa: la primera coincidencia gana
     ("practica", ("ejercicio", "problema", "practica", "resolver", "cuestion", "simulacro", "calcul")),
     ("redaccion", ("redact", "ensayo", "comentario", "escribir", "informe", "trabajo", "composicion")),
@@ -2240,14 +2249,11 @@ async def refrescar_panel_tarea(user_id: int, nota: str = "") -> None:
     if vista is None or vista.mensaje is None:
         return
     activa = await bot.almacen.tarea_activa(user_id)
-    try:
-        if activa is not None:
-            await vista.mensaje.edit(embed=embed_tarea(activa, _ahora_ts(), nota), view=vista)
-        else:
-            _paneles_tarea.pop(user_id, None)
-            await vista.mensaje.edit(content=nota or "Tarea cerrada.", embed=None, view=None)
-    except discord.HTTPException:
-        pass
+    if activa is not None:
+        await _editar_seguro(vista.mensaje, embed=embed_tarea(activa, _ahora_ts(), nota), view=vista)
+    else:
+        _paneles_tarea.pop(user_id, None)
+        await _editar_seguro(vista.mensaje, content=nota or "Tarea cerrada.", embed=None, view=None)
 
 
 class ValoracionView(discord.ui.View):
@@ -2272,11 +2278,7 @@ class ValoracionView(discord.ui.View):
             await interaction.response.defer()
 
     async def on_timeout(self) -> None:
-        if self.mensaje is not None:
-            try:
-                await self.mensaje.edit(content=self.contenido, view=None)
-            except discord.HTTPException:
-                pass
+        await _editar_seguro(self.mensaje, content=self.contenido, view=None)
 
     @discord.ui.select(placeholder="¿Cómo de cansado/a estabas?", row=0, options=[
         discord.SelectOption(label="1 · Nada cansado/a", value="1"),
@@ -2323,11 +2325,7 @@ class TareaView(discord.ui.View):
         _paneles_tarea.pop(self.user_id, None)
         for item in self.children:
             item.disabled = True
-        if self.mensaje is not None:
-            try:
-                await self.mensaje.edit(view=self)
-            except discord.HTTPException:
-                pass
+        await _editar_seguro(self.mensaje, view=self)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
         log.error("Error en el panel de tarea", exc_info=error)
@@ -2462,7 +2460,7 @@ async def configurar(ctx: commands.Context):
 @commands.cooldown(1, 10, commands.BucketType.user)
 async def borrar_mis_datos(ctx: commands.Context):
     await ctx.send(
-        "¿Seguro? Se borrarán tu perfil, tu rutina, tus claves, tus asignaturas y tus tareas y estadísticas de Zapy.",
+        MSG_CONFIRMAR_BORRADO,
         view=ConfirmarBorrado(ctx.author.id),
     )
 
