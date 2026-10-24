@@ -9,6 +9,7 @@ google-genai, cryptography y, en Windows, tzdata (para zoneinfo).
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import datetime as dt
 import json
@@ -23,6 +24,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
@@ -97,7 +99,7 @@ MAX_ALGORITMO_CHARS = 20_000
 HISTORIAL_MENSAJES = 10
 COOLDOWN_IA = 5  # s entre peticiones de IA por usuario
 MAX_TOKENS_CHAT = 1500  # los modelos con "thinking" gastan parte de este límite
-MAX_TOKENS_MASTERCLASS = 8192
+MAX_TOKENS_MASTERCLASS = 16384  # incluye los tokens de razonamiento del modelo
 NOTION_TIMEOUT = aiohttp.ClientTimeout(total=20)
 
 # Alias de asignatura -> variable de entorno con el ID de su base de datos.
@@ -198,27 +200,75 @@ PERSONA_BASE, _, RUTINA_PROPIETARIO = SYSTEM_PROMPT_BASE.partition("\n\n")
 RUTINA_PROPIETARIO = RUTINA_PROPIETARIO.strip()
 
 
-SYSTEM_PROMPT_MASTERCLASS = """Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y preparación para exámenes de ESO y Bachillerato. Tu habilidad principal es transformar temarios complejos en "Masterclasses" hiperdetalladas, rigurosas e imborrables para la memoria.
-El objetivo principal es elaborar una "Masterclass Completa" y exhaustiva sobre el tema que te pida, diseñada para un estudiante que busca sacar un 10 en su examen. Cada tema tiene que ser explicado de la mejor manera posible siendo claro. En el apartado siguiente te incorporo la estructura y reglas de formato.
+SYSTEM_PROMPT_MASTERCLASS = r"""Zapy, actúa como un catedrático y tutor académico de excelencia, especialista en pedagogía de alto rendimiento y en la preparación de exámenes de ESO y Bachillerato. Transformas temarios complejos en "Masterclasses" rigurosas, claras e imborrables para la memoria.
 
-ESTRUCTURA:
-INTRODUCCION DEL TEMA, RAPIDO Y CLARO. EJEMPLO: “ESTA MASTERCLASS TRATA DE LAS ECUACIONES DE SEGUNDO GRADO, AQUI APRENDERAS A HACERLAS PASO A PASO Y LUEGO TENDRAS UN EJERCICIOS DE PRUEBA”
+OBJETIVO
+Elabora una Masterclass completa sobre el tema que te pidan, para un estudiante que busca sacar un 10 en su examen. Debe poder entenderse a la primera aunque no sepa nada del tema y, a la vez, cubrir todo lo que puede caer en el examen. La claridad va por delante del lucimiento: cada concepto se explica con palabras sencillas, se ilustra con un ejemplo concreto y solo después se formaliza.
 
-FASE DE APRENDIZAJE: EN ESTA FASE VAS A ENSEÑARME PASO A PASO A HACER “X” EJERCICIO O EL TEMA. EJEMPLO: PARA CONVERTIR UNA ORACION NOMINAL EN UNA VERBAL, PRIMERO DEBES CAMBIAR ESTO… LUEGO HAY UN EJEMPLO DE LA EXPLICACION ABAJO Y ASI CONSTANTEMENTE. PD: SI ES UNA MASTERCLASS DE IDIOMA PON EL EJEMPLO EN LA LENGUA QUE SE QUIERE APRENDER.
+ESTRUCTURA (respétala; un encabezado ## por fase)
+## Introducción
+Rápida y clara: de qué trata la masterclass, qué vas a aprender a hacer y qué conviene saber antes. Ejemplo de tono: "Esta masterclass trata de las ecuaciones de segundo grado: aquí aprenderás a resolverlas paso a paso y al final tendrás ejercicios de prueba."
+## Fase de aprendizaje
+Enséñame paso a paso a hacer el ejercicio o a dominar el tema, con subapartados ###. Para cada concepto: (1) la idea intuitiva, con una analogía o una situación cotidiana; (2) la definición o regla exacta, en **negrita**; (3) un ejemplo resuelto en el que se vean TODOS los pasos intermedios y se explique el porqué de cada uno. Ve de lo simple a lo complejo y encadena cada apartado con el anterior. Si es una masterclass de idiomas, pon los ejemplos en la lengua que se quiere aprender (con su traducción al castellano). Cierra esta fase con una "Chuleta" en un aviso [!IMPORTANTE] con lo imprescindible (definiciones, fórmulas y reglas clave) para repasar el día antes del examen.
+## Ejercicios de práctica
+Penúltima fase: crea ejercicios para practicar lo aprendido, numerados y ordenados de más fáciles a más difíciles (el último, de nivel examen). Sin soluciones en esta fase.
+## Errores típicos y corrección
+Última fase: enseña los errores más habituales con su explicación y da la corrección de TODOS los ejercicios de práctica con su razonamiento paso a paso. Pon cada corrección dentro de un desplegable, para que el estudiante lo intente antes de mirar.
 
-FASE DE EJERCICIOS DE PRACTICA: EN LA PENULTIMA FASE CREA EJERCICIOS DE PRUEBA PARA PRACTICAR LO APRENDIDO. HAZLOS DE MAS FACILES A MAS DIFICILES.
+CALIDAD
+- Define cada término técnico la primera vez que aparezca. Frases cortas y directas; nada de relleno ni de repetir lo mismo con otras palabras.
+- En cálculos y razonamientos muestra todos los pasos intermedios y comprueba mentalmente cada resultado numérico antes de escribirlo.
+- Rigor: no inventes datos, fechas, fórmulas, nombres ni citas. Si no estás seguro de algo, no lo incluyas.
+- Cubre el tema completo, sin omitir apartados por extensos que sean, pero sin salirte del temario ni del nivel del curso del estudiante.
+- Tono cercano, motivador y serio. No añadas saludos ni comentarios fuera de la masterclass (nada de "Aquí tienes...") y no la envuelvas en un bloque de código: responde solo con el Markdown.
 
-ERRORES TIPICOS Y CORRECCION DE EJERCICIOS: ENSEÑA LOS ERRORES TIPICOS CON SU EXPLICACIÓN. DA LA CORRECION DE EJERCICIOS CON SU RESPECTIVA EXPLICACION.
-
-REGLAS DE FORMATO (Markdown, se publicará en Notion):
-- Jerarquía visual clara: usa encabezados (#, ##, ###) para dividir el contenido en módulos lógicos y progresivos.
-- Glosario de conceptos clave: al inicio de cada sección, destaca en **negrita** las definiciones exactas necesarias para las preguntas teóricas de examen.
-- Fórmulas (si el tema involucra ciencias, matemáticas o lógica): inclúyelas todas en LaTeX, con $formula$ en línea y, para ecuaciones centradas, $$ en una línea, la fórmula en la siguiente y $$ en otra. Explica el significado y las unidades de cada variable.
-- Desglose de conceptos: usa listas con viñetas para explicar reglas, criterios de signos, excepciones o clasificaciones.
-- No uses tablas Markdown (usa listas). No añadas saludos ni comentarios fuera de la masterclass.
-
-Tono y enfoque: directo, riguroso, didáctico y sin omitir ningún apartado del tema por extenso que sea.
+HERRAMIENTAS VISUALES (úsalas cuando ayuden a entender; mejor pocas y muy claras que muchas)
+1. FÓRMULAS (LaTeX compatible con KaTeX): en línea con $...$ y centradas con $$ en una línea, la fórmula en la siguiente y $$ en otra. Una sola fórmula por bloque y de menos de 400 caracteres. Reglas: para varias líneas alineadas usa \begin{aligned} ... \end{aligned} (nunca align ni equation); sin \label, \ref, \ce, siunitx ni paquetes; unidades con \text{...} (por ejemplo $9{,}8\ \text{m/s}^2$); fórmulas químicas con \mathrm{H_2O}; nunca un $ dentro de una fórmula. Tras cada fórmula importante explica qué significa cada variable y sus unidades.
+2. DIAGRAMAS (Mermaid), en un bloque ```mermaid. Úsalos para procesos, algoritmos, causa y efecto, clasificaciones, ciclos y secuencias (máximo 3 por masterclass). Permitidos: flowchart TD o LR, sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram, pie y gantt. Reglas estrictas: ids de nodo simples (A, B, C1...); TODAS las etiquetas entre comillas dobles; flechas con texto como -->|"Sí"|; máximo 12 nodos y etiquetas de menos de 40 caracteres; sin HTML, sin style/classDef/click y sin paréntesis fuera de las comillas. Ejemplo:
+```mermaid
+flowchart TD
+    A["Inicio"] --> B{"¿El discriminante es positivo?"}
+    B -->|"Sí"| C["Dos soluciones reales"]
+    B -->|"No"| D["Sin soluciones reales"]
+```
+3. GRÁFICAS (las dibuja Zapy), en un bloque ```grafica. Úsalas para funciones, cinemática, estadística... (máximo 3 por masterclass). Una clave por línea. Ejemplo:
+```grafica
+titulo: Parábola y = x² − 4
+x: -4, 4
+funcion: x^2 - 4 | y = x² − 4
+marcar: (2,0) raíz
+marcar: (-2,0) raíz
+marcar: (0,-4) vértice
+ejex: x
+ejey: y
+```
+Reglas: las expresiones usan x con + - * / ^, paréntesis, las funciones sin cos tan asin acos atan sqrt exp abs ln (neperiano) y log (base 10) y las constantes pi y e. Hasta 3 líneas funcion: o series de datos con puntos: (0,0) (1,3) (2,5) | Nombre. El rango x: es obligatorio si hay funciones; y: es opcional. Con marcar: (x,y) etiqueta señalas puntos importantes (raíces, vértice, cortes): comprueba que de verdad están sobre la gráfica.
+4. TABLAS Markdown, para comparar, clasificar, conjugar o listar vocabulario (máximo 6 columnas).
+5. AVISOS: citas cuya primera línea lleva una etiqueta: > [!IDEA] (intuición o analogía), > [!DEFINICION] (definición o regla exacta), > [!EJEMPLO], > [!TRUCO] (regla mnemotécnica o atajo), > [!ERROR] (error típico) o > [!IMPORTANTE] (lo que más cae en el examen). Tras la etiqueta puedes poner un título breve; el contenido va en las líneas siguientes, también con >.
+6. DESPLEGABLES: <details><summary>Título</summary> y </details>, cada uno en su línea y con el contenido entre medias.
+7. CÓDIGO: bloques con su lenguaje (python, arduino, bash, c++...) en tecnología, robótica o digitalización; comenta las líneas importantes y no pases de 40 líneas.
+No uses imágenes, enlaces a imágenes, arte ASCII ni más HTML que details y summary.
 """
+
+
+PISTAS_ASIGNATURA = {
+    "mates": "Prioriza el razonamiento paso a paso con fórmulas LaTeX y ejemplos numéricos sencillos antes de los de nivel examen. Si el tema es de funciones, geometría analítica, trigonometría o estadística, incluye gráficas con los puntos clave marcados.",
+    "fyq": "Escribe siempre las magnitudes con sus unidades y despeja las fórmulas en los ejemplos. En cinemática y dinámica usa gráficas (posición-tiempo, velocidad-tiempo). En química, ajusta las reacciones paso a paso y usa tablas para propiedades y clasificaciones. Los procesos, ciclos y clasificaciones, como diagramas.",
+    "tecno": "Usa diagramas de flujo para procesos, algoritmos y sistemas de control, y tablas para comparar materiales, componentes o tecnologías. Si hay código, que sea breve y comentado.",
+    "digi": "Usa diagramas para explicar procesos, redes y flujos de información, y tablas para comparar herramientas o conceptos. Si hay código, que sea breve y comentado.",
+    "robotica": "Usa diagramas de flujo para la lógica del programa y para los sistemas sensor-controlador-actuador. El código (arduino o python) breve y comentado, y las fórmulas de movimiento o electricidad en LaTeX.",
+    "euskera": "Explica en castellano, pero pon todos los ejemplos en euskera con su traducción. Usa tablas para declinaciones, conjugaciones y vocabulario.",
+    "lengua": "Usa tablas para clasificaciones (tipos de oraciones, categorías gramaticales...) y ejemplos analizados paso a paso. Diagramas solo si ayudan de verdad.",
+    "ingles": "Explica en castellano y pon todos los ejemplos en inglés con su traducción. Usa tablas para tiempos verbales, vocabulario y estructuras.",
+    "geo-hist": "Presenta las causas y consecuencias con diagramas, las cronologías como tabla (fecha | hecho) y los conceptos con definiciones exactas. Incluye solo fechas, nombres y datos de los que estés totalmente seguro.",
+}
+PISTA_GENERICA = ("Adapta los recursos visuales a la materia: diagramas para procesos y relaciones, tablas para "
+                  "comparar y gráficas para funciones o datos.")
+
+
+def pistas_asignatura(asignatura: str) -> str:
+    clave = (alias_equivalentes(asignatura) or [""])[0]
+    return PISTAS_ASIGNATURA.get(clave, PISTA_GENERICA)
 
 
 # ----------------------------------------------------------------------------
@@ -240,15 +290,22 @@ class Notion:
             "Content-Type": "application/json",
         }
 
-    async def request(self, method: str, endpoint: str, payload: dict | None = None) -> dict:
+    async def request(self, method: str, endpoint: str, payload: dict | None = None, *,
+                      archivo: tuple[bytes, str, str] | None = None) -> dict:
         url = f"{self.BASE}/{endpoint.lstrip('/')}"
         ultimo_error = "sin respuesta"
         for intento in range(3):
             espera = 2**intento
             try:
-                async with self._sem, self._session.request(
-                    method, url, headers=self._headers, json=payload, timeout=NOTION_TIMEOUT
-                ) as resp:
+                if archivo is None:
+                    opciones = {"headers": self._headers, "json": payload}
+                else:  # multipart: un FormData no se puede reutilizar, se rehace en cada intento
+                    contenido, nombre, mime = archivo
+                    formulario = aiohttp.FormData()
+                    formulario.add_field("file", contenido, filename=nombre, content_type=mime)
+                    opciones = {"headers": {k: v for k, v in self._headers.items() if k != "Content-Type"},
+                                "data": formulario}
+                async with self._sem, self._session.request(method, url, timeout=NOTION_TIMEOUT, **opciones) as resp:
                     if resp.status == 429 or resp.status >= 500:
                         ultimo_error = f"HTTP {resp.status}"
                         espera = float(resp.headers.get("Retry-After", espera))
@@ -261,6 +318,14 @@ class Notion:
             if intento < 2:
                 await asyncio.sleep(espera)
         raise NotionError(f"{method} {endpoint} falló tras 3 intentos ({ultimo_error})")
+
+    async def subir_archivo(self, contenido: bytes, nombre: str, mime: str) -> str:
+        """Sube un archivo pequeño con la API de subida directa de Notion y devuelve su ID para adjuntarlo."""
+        if len(contenido) > MAX_ARCHIVO_BYTES:
+            raise NotionError("el archivo supera el límite de Notion")
+        creado = await self.request("POST", "file_uploads", {"filename": nombre, "content_type": mime})
+        await self.request("POST", f"file_uploads/{creado['id']}/send", archivo=(contenido, nombre, mime))
+        return creado["id"]
 
     async def query_database(self, db_id: str) -> list[dict]:
         paginas: list[dict] = []
@@ -1045,19 +1110,545 @@ async def obtener_algoritmo_asignatura(perfil: Perfil, db_id: str) -> str:
     return contenido
 
 
-# --- Markdown -> bloques de Notion -----------------------------------------
+# --- Markdown -> bloques de Notion (fórmulas, diagramas, gráficas, tablas, avisos y desplegables) ---
 RICH_MAX = 2000  # límite de Notion por trozo de texto
 EQ_MAX = 1000  # límite de Notion por ecuación
-_LENGUAJES_CODIGO = {"python", "java", "javascript", "json", "bash", "c", "c++", "sql", "html", "css"}
-_RE_INLINE = re.compile(r"(\$\$[^$\n]+\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\*\*[^*\n]+\*\*)")
+MAX_GRAFICAS = 4
+MAX_ARCHIVO_BYTES = 5 * 1024 * 1024  # tope de Notion por archivo en espacios gratuitos
+_LENGUAJES_CODIGO = {"python", "java", "javascript", "typescript", "json", "bash", "shell", "c", "c++", "c#",
+                     "sql", "html", "css", "arduino", "markdown", "latex", "mermaid"}
+_ALIAS_LENGUAJE = {"py": "python", "js": "javascript", "ts": "typescript", "cpp": "c++", "csharp": "c#",
+                   "sh": "shell", "ino": "arduino", "md": "markdown", "tex": "latex"}
+_RE_INLINE = re.compile(
+    r"(\$\$[^$\n]+\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\*\*[^*\n]+\*\*|`[^`\n]+`"
+    r"|(?<![\w*])\*(?![\s*])[^*\n]+?(?<![\s*])\*(?![\w*]))"
+)
+_CALLOUTS = {  # etiqueta -> (emoji, color de Notion, título por defecto)
+    "IDEA": ("🧠", "purple_background", "Idea clave"),
+    "DEFINICION": ("📖", "blue_background", "Definición"),
+    "DEF": ("📖", "blue_background", "Definición"),
+    "EJEMPLO": ("✏️", "green_background", "Ejemplo"),
+    "TRUCO": ("💡", "yellow_background", "Truco"),
+    "ERROR": ("⚠️", "red_background", "Error típico"),
+    "OJO": ("👀", "orange_background", "Ojo"),
+    "IMPORTANTE": ("⭐", "orange_background", "Importante"),
+    "NOTE": ("📝", "gray_background", "Nota"),
+    "TIP": ("💡", "yellow_background", "Consejo"),
+    "WARNING": ("⚠️", "red_background", "Atención"),
+    "CAUTION": ("⛔", "red_background", "Cuidado"),
+}
+_RE_CALLOUT = re.compile(r"^\[!\s*([^\]\s]+)\s*\]\s*(.*)$")
 
 
 def _limpiar_texto(texto: str) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", texto.replace("\r\n", "\n")).strip()
 
 
-def _trozos_texto(texto: str, negrita: bool = False) -> list[dict]:
-    extra = {"annotations": {"bold": True}} if negrita else {}
+# --- Fórmulas: LaTeX compatible con KaTeX (el que usa Notion) ----------------------
+_LATEX_PROHIBIDO = re.compile(
+    r"\\(?:usepackage|newcommand|renewcommand|def|input|include|write|href|url|includegraphics|"
+    r"eqref|ref|cite|SI|si|qty|num|unit|cancelto|mathbbm|require|ce)(?![A-Za-z])"
+)
+
+
+# Comandos \xxx que reconoce KaTeX 0.16 (el motor de fórmulas de Notion), extraídos del propio KaTeX.
+_COMANDOS_KATEX = frozenset((
+    "AA Alpha And Bbb Bbbk Beta Big Bigg Biggl Biggm Biggr Bigl Bigm Bigr Box Bra Braket Bumpeq Cap "
+    "Chi Colonapprox Coloneq Coloneqq Colonsim Complex Cup DOTSB DOTSI DOTSX Dagger Darr Delta "
+    "Diamond Doteq Downarrow Epsilon Eqcolon Eqqcolon Eta Finv Game Gamma H Harr Huge Im Iota Join "
+    "KaTeX Kappa Ket LARGE LaTeX Lambda Large Larr Leftarrow Leftrightarrow Lleftarrow Longleftarrow "
+    "Longleftrightarrow Longrightarrow Lrarr Lsh Mu N Nu Omega Omicron Overrightarrow P Phi Pi Pr Psi "
+    "R Rarr Re Reals Rho Rightarrow Rrightarrow Rsh S Set Sigma Subset Supset Tau TeX TextOrMath "
+    "Theta Uarr Uparrow Updownarrow Upsilon Vdash Vert Vvdash Xi Z Zeta aa above acute alef alefsym "
+    "aleph allowbreak alpha amalg angl angle angln approx approxcolon approxcoloncolon approxeq "
+    "arccos arcctg arcsin arctan arctg arg argmax argmin ast asymp atop backepsilon backprime backsim "
+    "backsimeq backslash bar barwedge bcancel because begin begingroup beta beth between bf bgroup "
+    "big bigcap bigcirc bigcup bigg biggl biggm biggr bigl bigm bigodot bigoplus bigotimes bigr "
+    "bigsqcup bigstar bigtriangledown bigtriangleup biguplus bigvee bigwedge binom blacklozenge "
+    "blacksquare blacktriangle blacktriangledown blacktriangleleft blacktriangleright blue blueA "
+    "blueB blueC blueD blueE bm bmod bold boldsymbol bot bowtie boxdot boxed boxminus boxplus "
+    "boxtimes bra brace brack braket breve bull bullet bumpeq c cal cancel cap cdot cdotp cdots "
+    "centerdot cfrac ch char check checkmark chi choose circ circeq circlearrowleft circlearrowright "
+    "circledR circledS circledast circledcirc circleddash clap clubs clubsuit cnums colon colonapprox "
+    "coloncolon coloncolonapprox coloncolonequals coloncolonminus coloncolonsim coloneq coloneqq "
+    "colonequals colonminus colonsim color colorbox complement cong coprod copyright cos cosec cosh "
+    "cot cotg coth csc ctg cth cup curlyeqprec curlyeqsucc curlyvee curlywedge curvearrowleft "
+    "curvearrowright dArr dag dagger daleth darr dashleftarrow dashrightarrow dashv dbinom dblcolon "
+    "ddag ddagger ddddot dddot ddot ddots def deg degree delta det dfrac diagdown diagup diamond "
+    "diamonds diamondsuit digamma dim displaystyle div divideontimes dot doteq doteqdot dotplus dots "
+    "dotsb dotsc dotsi dotsm dotso dotsx doublebarwedge doublecap doublecup downarrow downdownarrows "
+    "downharpoonleft downharpoonright edef egroup ell emph empty emptyset end endgroup enskip enspace "
+    "epsilon eqcirc eqcolon eqqcolon eqsim eqslantgtr eqslantless equalscolon equalscoloncolon equiv "
+    "errmessage eta eth exist exists exp expandafter fallingdotseq fbox fcolorbox flat footnotesize "
+    "forall frac frak frown futurelet gamma gcd gdef ge genfrac geq geqq geqslant gets gg ggg gggtr "
+    "gimel global gnapprox gneq gneqq gnsim goldA goldB goldC goldD goldE grave gray grayA grayB "
+    "grayC grayD grayE grayF grayG grayH grayI green greenA greenB greenC greenD greenE gt gtrapprox "
+    "gtrdot gtreqless gtreqqless gtrless gtrsim gvertneqq hArr harr hat hbar hbox hdashline hearts "
+    "heartsuit hline hom hookleftarrow hookrightarrow hphantom href hskip hslash hspace htmlClass "
+    "htmlData htmlId htmlStyle huge iff iiint iint image imageof imath impliedby implies in "
+    "includegraphics inf infin infty injlim int intercal intop iota isin it jmath kaBlue kaGreen "
+    "kappa ker kern ket lArr lBrace lVert lambda land lang langle large larr lbrace lbrack lceil "
+    "ldotp ldots le leadsto left leftarrow leftarrowtail leftharpoondown leftharpoonup leftleftarrows "
+    "leftrightarrow leftrightarrows leftrightharpoons leftrightsquigarrow leftthreetimes leq leqq "
+    "leqslant lessapprox lessdot lesseqgtr lesseqqgtr lessgtr lesssim let lfloor lg lgroup lhd lim "
+    "liminf limits limsup ll llap llbracket llcorner lll llless lmoustache ln lnapprox lneq lneqq "
+    "lnot lnsim log long longleftarrow longleftrightarrow longmapsto longrightarrow looparrowleft "
+    "looparrowright lor lozenge lparen lq lrArr lrarr lrcorner lt ltimes lvert lvertneqq maltese "
+    "mapsto maroonA maroonB maroonC maroonD maroonE mathbb mathbf mathbin mathcal mathchoice mathclap "
+    "mathclose mathellipsis mathfrak mathinner mathit mathllap mathnormal mathop mathopen mathord "
+    "mathpunct mathrel mathring mathrlap mathrm mathscr mathsf mathsfit mathsterling mathstrut mathtt "
+    "max measuredangle medspace message mho mid middle min mintA mintB mintC minuscolon "
+    "minuscoloncolon minuso mkern mod models mp mskip mu multimap nLeftarrow nLeftrightarrow "
+    "nRightarrow nVDash nVdash nabla natnums natural ncong ne nearrow neg negmedspace negthickspace "
+    "negthinspace neq newcommand newline nexists ngeq ngeqq ngeqslant ngtr ni nleftarrow "
+    "nleftrightarrow nleq nleqq nleqslant nless nmid nobreak nobreakspace noexpand nolimits nonumber "
+    "normalsize not notag notin notni nparallel nprec npreceq nrightarrow nshortmid nshortparallel "
+    "nsim nsubseteq nsubseteqq nsucc nsucceq nsupseteq nsupseteqq ntriangleleft ntrianglelefteq "
+    "ntriangleright ntrianglerighteq nu nvDash nvdash nwarrow odot oiiint oiint oint omega omicron "
+    "ominus operatorname operatornamewithlimits oplus orange ordinarycolon origof oslash otimes over "
+    "overbrace overbracket overgroup overleftarrow overleftharpoon overleftrightarrow overline "
+    "overlinesegment overrightarrow overrightharpoon overset owns parallel partial perp phantom phase "
+    "phi pi pink pitchfork plim plusmn pm pmb pmod pod pounds prec precapprox preccurlyeq preceq "
+    "precnapprox precneqq precnsim precsim prime prod projlim propto providecommand psi purple "
+    "purpleA purpleB purpleC purpleD purpleE qquad quad r rArr rBrace rVert raisebox rang rangle rarr "
+    "ratio rbrace rbrack rceil real reals red redA redB redC redD redE relax renewcommand restriction "
+    "rfloor rgroup rhd rho right rightarrow rightarrowtail rightharpoondown rightharpoonup "
+    "rightleftarrows rightleftharpoons rightrightarrows rightsquigarrow rightthreetimes risingdotseq "
+    "rlap rm rmoustache rparen rq rrbracket rtimes rule rvert scriptscriptstyle scriptsize "
+    "scriptstyle sdot searrow sec sect set setminus sf sh sharp shortmid shortparallel show sigma sim "
+    "simcolon simcoloncolon simeq sin sinh sixptsize small smallfrown smallint smallsetminus "
+    "smallsmile smash smile sout space spades spadesuit sphericalangle sqcap sqcup sqrt sqsubset "
+    "sqsubseteq sqsupset sqsupseteq square stackrel star sub sube subset subseteq subseteqq subsetneq "
+    "subsetneqq substack succ succapprox succcurlyeq succeq succnapprox succneqq succnsim succsim sum "
+    "sup supe supset supseteq supseteqq supsetneq supsetneqq surd swarrow tag tan tanh tau tbinom "
+    "tealA tealB tealC tealD tealE text textbf textcircled textcolor textcopyright textit textmd "
+    "textnormal textregistered textrm textsf textstyle texttt textup tfrac tg th therefore theta "
+    "thetasym thickapprox thicksim thickspace thinspace tilde times tiny tmspace to top triangle "
+    "triangledown triangleleft trianglelefteq triangleq triangleright trianglerighteq tt "
+    "twoheadleftarrow twoheadrightarrow u uArr uarr ulcorner underbar underbrace underbracket "
+    "undergroup underleftarrow underleftrightarrow underline underlinesegment underrightarrow "
+    "underset unlhd unrhd uparrow updownarrow upharpoonleft upharpoonright uplus upsilon upuparrows "
+    "urcorner url utilde v vDash varDelta varGamma varLambda varOmega varPhi varPi varPsi varSigma "
+    "varTheta varUpsilon varXi varepsilon varinjlim varkappa varliminf varlimsup varnothing varphi "
+    "varpi varprojlim varpropto varrho varsigma varsubsetneq varsubsetneqq varsupsetneq varsupsetneqq "
+    "vartheta vartriangle vartriangleleft vartriangleright varvdots vcentcolon vcenter vdash vdots "
+    "vec vee veebar verb vert vphantom wedge weierp widecheck widehat widetilde wp wr xLeftarrow "
+    "xLeftrightarrow xRightarrow xcancel xdef xhookleftarrow xhookrightarrow xi xleftarrow "
+    "xleftequilibrium xleftharpoondown xleftharpoonup xleftrightarrow xleftrightharpoons xlongequal "
+    "xmapsto xrightarrow xrightequilibrium xrightharpoondown xrightharpoonup xrightleftarrows "
+    "xrightleftharpoons xtofrom xtwoheadleftarrow xtwoheadrightarrow yen zeta "
+).split())
+_ENTORNOS_KATEX = {"matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix", "smallmatrix", "array",
+                   "cases", "rcases", "aligned", "alignedat", "gathered", "subarray"}
+
+
+def latex_seguro(expr: str) -> str | None:
+    """Corrige los fallos típicos de LaTeX generado por IA. None si no se puede garantizar que Notion lo acepte."""
+    e = re.sub(r"\\label\{[^}]*\}", "", expr)
+    e = re.sub(r"\\begin\{(?:align|eqnarray|split|gather|multline)\*?\}", lambda _: r"\begin{aligned}", e)
+    e = re.sub(r"\\end\{(?:align|eqnarray|split|gather|multline)\*?\}", lambda _: r"\end{aligned}", e)
+    e = re.sub(r"\\(?:begin|end)\{equation\*?\}", "", e)
+    e = e.replace("\\bm{", "\\boldsymbol{").replace("\\degree", "^\\circ").strip()
+    e = re.sub(r"\\(sen|senh|arcsen|arccosec|tgh|arccotg)(?![A-Za-z])", r"\\operatorname{\1}", e)  # operadores en español
+    if not e or len(e) > EQ_MAX or "$" in e or _LATEX_PROHIBIDO.search(e):
+        return None
+    llaves = 0
+    for c in e.replace("\\{", "").replace("\\}", ""):
+        llaves += (c == "{") - (c == "}")
+        if llaves < 0:
+            return None
+    izquierdos, derechos = (len(re.findall(rf"\\{c}(?![A-Za-z])", e)) for c in ("left", "right"))  # sin confundir \rightarrow con \right
+    if llaves != 0 or izquierdos != derechos or e.count("\\begin{") != e.count("\\end{"):
+        return None
+    if set(re.findall(r"\\([A-Za-z]+)", e)) - _COMANDOS_KATEX or set(re.findall(r"\\begin\{([^}]*)\}", e)) - _ENTORNOS_KATEX:
+        return None  # un comando o entorno que KaTeX no conoce haría que Notion rechazase la fórmula
+    return e
+
+
+# --- Diagramas: Mermaid (Notion los dibuja solo) -----------------------------------------
+_TIPOS_MERMAID = {"flowchart", "graph", "sequencediagram", "statediagram", "statediagram-v2",
+                  "classdiagram", "erdiagram", "pie", "gantt", "journey"}
+
+
+_CIERRE_FORMA = {"[": "]", "(": ")", "{": "}"}
+
+
+def _citar_etiquetas_flowchart(texto: str) -> str:
+    """Pone entre comillas las etiquetas de los nodos, que es lo que más rompe los diagramas (paréntesis,
+    comas, corchetes anidados...). Respeta lo ya entrecomillado y cuenta los anidamientos."""
+    salida, i, n = [], 0, len(texto)
+    while i < n:
+        c = texto[i]
+        if c == '"':  # texto ya entrecomillado: se deja tal cual
+            j = texto.find('"', i + 1)
+            fin = n if j == -1 or "\n" in texto[i:j] else j + 1
+            salida.append(texto[i:fin])
+            i = fin
+            continue
+        if (c in _CIERRE_FORMA and i > 0 and (texto[i - 1].isalnum() or texto[i - 1] == "_")
+                and i + 1 < n and texto[i + 1] not in '[({/\\"'):  # formas especiales ([[ ([ (( {{ [/ ...) se respetan
+            cierre, hondo, j = _CIERRE_FORMA[c], 1, i + 1
+            while j < n and texto[j] != "\n" and hondo:
+                hondo += (texto[j] == c) - (texto[j] == cierre)
+                j += 1
+            etiqueta = texto[i + 1 : j - 1].strip()
+            if hondo == 0 and etiqueta:
+                salida.append(f'{c}"{etiqueta.replace(chr(34), chr(39))}"{cierre}')
+                i = j
+                continue
+        salida.append(c)
+        i += 1
+    # etiquetas de las flechas: -->|texto|  (solo fuera de comillas)
+    trozos = re.split(r'("[^"\n]*")', "".join(salida))
+    for k in range(0, len(trozos), 2):
+        trozos[k] = re.sub(r"((?:-->|---|-\.->|==>|--)\s*)\|([^|\n\"]+)\|",
+                           lambda m: f'{m.group(1)}|"{m.group(2).strip()}"|', trozos[k])
+    return "".join(trozos)
+
+
+def _proteger_end(texto: str) -> str:
+    """'end' en minúscula como nombre de nodo rompe los flowchart (cierra un subgraph): se escribe 'End'."""
+    lineas = []
+    for linea in texto.split("\n"):
+        if linea.strip() != "end":  # la línea 'end' sola sí cierra un subgraph
+            partes = re.split(r'("[^"\n]*")', linea)
+            for k in range(0, len(partes), 2):
+                partes[k] = re.sub(r"(?<![\w.-])end(?![\w-])", "End", partes[k])
+            linea = "".join(partes)
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
+def _sin_punto_y_coma(texto: str) -> str:
+    """En secuencias y estados el ';' del texto de un mensaje se interpreta como fin de instrucción."""
+    lineas = []
+    for linea in texto.split("\n"):
+        antes, dos_puntos, despues = linea.partition(":")
+        if dos_puntos and not linea.strip().startswith("%%"):
+            linea = antes + ":" + despues.replace(";", ",")
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
+def mermaid_seguro(codigo: str) -> str | None:
+    """Diagrama saneado, o None si no es de un tipo conocido o es sospechoso (se guardará como texto)."""
+    lineas = [l.rstrip() for l in codigo.strip().split("\n") if not l.strip().startswith("%%{")]
+    utiles = [l for l in lineas if l.strip() and not l.strip().startswith("%%")]
+    if not utiles or len(utiles) > 80:
+        return None
+    tipo = utiles[0].split()[0].lower()
+    texto = "\n".join(lineas).strip()
+    if tipo not in _TIPOS_MERMAID or re.search(r"(?im)^\s*click\s|<script|javascript:|\bhref\b|onerror|onclick", texto):
+        return None
+    if tipo in {"flowchart", "graph"}:
+        texto = _proteger_end(_citar_etiquetas_flowchart(texto))
+    elif tipo in {"sequencediagram", "statediagram", "statediagram-v2"}:
+        texto = _sin_punto_y_coma(texto)
+    return texto if len(texto) <= RICH_MAX else None
+
+
+# --- Gráficas: expresiones seguras + dibujo SVG propio ------------------------------------
+_FUNCIONES = {"sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos,
+              "atan": math.atan, "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh, "exp": math.exp,
+              "ln": math.log, "log": math.log10, "log10": math.log10, "log2": math.log2, "sqrt": math.sqrt,
+              "abs": abs}
+_CONSTANTES = {"pi": math.pi, "e": math.e}
+_SUSTITUCIONES = (("²", "**2"), ("³", "**3"), ("^", "**"), ("√", "sqrt"), ("π", "pi"), ("×", "*"),
+                  ("·", "*"), ("÷", "/"), ("−", "-"), ("–", "-"))
+_NODOS_OK = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Constant, ast.Load,
+             ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd)
+COLORES_GRAFICA = ("#1f77b4", "#d62728", "#2ca02c", "#ff7f0e")
+
+
+def _normalizar_expresion(texto: str) -> str:
+    t = re.sub(r"^\s*(?:y|f\s*\(\s*x\s*\))\s*=\s*", "", texto.strip(), flags=re.IGNORECASE)
+    for viejo, nuevo in _SUSTITUCIONES:
+        t = t.replace(viejo, nuevo)
+    t = re.sub(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?=[a-zA-Z(])", r"\1*", t)  # 2x -> 2*x ; 3(x+1) -> 3*(x+1)
+    t = re.sub(r"\)\s*(?=[\w(])", ")*", t)                              # (x+1)(x-1) -> (x+1)*(x-1)
+    return re.sub(r"\bx\s*(?=\()", "x*", t)                             # x(x+1) -> x*(x+1)
+
+
+def compilar_expresion(texto: str) -> ast.AST:
+    """Valida una expresión matemática con lista blanca de nodos: no se ejecuta código del usuario ni de la IA."""
+    if len(texto) > 160:
+        raise ValueError("expresión demasiado larga")
+    try:
+        arbol = ast.parse(_normalizar_expresion(texto), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        raise ValueError(f"no entiendo la expresión «{texto[:40]}»") from None
+    nodos = list(ast.walk(arbol))
+    if len(nodos) > 90:
+        raise ValueError("expresión demasiado compleja")
+    nombres_de_funcion = {id(n.func) for n in nodos if isinstance(n, ast.Call)}
+    for n in nodos:
+        if not isinstance(n, _NODOS_OK):
+            raise ValueError(f"operación no permitida en «{texto[:40]}»")
+        if isinstance(n, ast.Constant) and type(n.value) not in (int, float):
+            raise ValueError("solo se admiten números")
+        if isinstance(n, ast.Call) and not (isinstance(n.func, ast.Name) and n.func.id in _FUNCIONES
+                                            and len(n.args) == 1 and not n.keywords):
+            raise ValueError(f"función no permitida en «{texto[:40]}»")
+        if isinstance(n, ast.Name) and id(n) not in nombres_de_funcion and n.id != "x" and n.id not in _CONSTANTES:
+            raise ValueError(f"no conozco «{n.id}»")
+    return arbol.body
+
+
+def _potencia(a: float, b: float) -> float:
+    if abs(b) > 100 or abs(a) > 1e9:  # evita cálculos gigantes (p. ej. 9**9**9)
+        raise OverflowError
+    return math.pow(a, b)
+
+
+def _ejecutar(n: ast.AST, x: float | None) -> float:
+    if isinstance(n, ast.Constant):
+        return float(n.value)
+    if isinstance(n, ast.Name):
+        if n.id == "x":
+            if x is None:
+                raise ValueError("aquí no puede aparecer x")
+            return x
+        return _CONSTANTES[n.id]
+    if isinstance(n, ast.UnaryOp):
+        v = _ejecutar(n.operand, x)
+        return -v if isinstance(n.op, ast.USub) else v
+    if isinstance(n, ast.BinOp):
+        a, b = _ejecutar(n.left, x), _ejecutar(n.right, x)
+        if isinstance(n.op, ast.Pow):
+            return _potencia(a, b)
+        if isinstance(n.op, ast.Add):
+            return a + b
+        if isinstance(n.op, ast.Sub):
+            return a - b
+        if isinstance(n.op, ast.Mult):
+            return a * b
+        if isinstance(n.op, ast.Div):
+            return a / b
+        return a % b
+    if isinstance(n, ast.Call):
+        return _FUNCIONES[n.func.id](_ejecutar(n.args[0], x))
+    raise ValueError("expresión no válida")
+
+
+def evaluar(expr: ast.AST, x: float | None = None) -> float | None:
+    """Valor de la expresión en x, o None si no está definida ahí (división por cero, raíz de negativo...)."""
+    try:
+        v = _ejecutar(expr, x)
+    except (ZeroDivisionError, ValueError, OverflowError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _numero(texto: str) -> float:
+    v = evaluar(compilar_expresion(texto))
+    if v is None:
+        raise ValueError(f"«{texto[:30]}» no es un número válido")
+    return v
+
+
+def _dividir_nivel0(texto: str, sep: str = ",") -> list[str]:
+    partes, nivel, actual = [], 0, ""
+    for c in texto:
+        nivel += (c == "(") - (c == ")")
+        if c == sep and nivel == 0:
+            partes.append(actual)
+            actual = ""
+        else:
+            actual += c
+    return partes + [actual]
+
+
+def _punto(texto: str) -> tuple[float, float]:
+    partes = _dividir_nivel0(texto.strip().strip("()"))
+    if len(partes) != 2:
+        raise ValueError(f"punto no válido «{texto[:30]}»")
+    return _numero(partes[0]), _numero(partes[1])
+
+
+def parsear_grafica(texto: str) -> dict:
+    """Bloque ```grafica -> especificación validada. Lanza ValueError con un motivo legible si algo falla."""
+    spec: dict = {"titulo": "", "ejex": "x", "ejey": "y", "x": None, "y": None,
+                  "funciones": [], "series": [], "marcas": []}
+    for linea in texto.splitlines():
+        linea = linea.strip()
+        clave, dos_puntos, valor = linea.partition(":")
+        if not linea or linea.startswith("#") or not dos_puntos:
+            continue
+        clave, valor = _norm(clave).replace(" ", ""), valor.strip()
+        if clave == "titulo":
+            spec["titulo"] = valor[:80]
+        elif clave in {"ejex", "ejey"}:
+            spec[clave] = valor[:30]
+        elif clave in {"x", "y"}:
+            ext = _dividir_nivel0(valor)
+            if len(ext) != 2:
+                raise ValueError(f"el rango de {clave} debe ser «mínimo, máximo»")
+            lo, hi = _numero(ext[0]), _numero(ext[1])
+            if not lo < hi or hi - lo > 1e6:
+                raise ValueError(f"rango de {clave} no válido")
+            spec[clave] = (lo, hi)
+        elif clave in {"funcion", "funciones"}:
+            cuerpo, _, etiqueta = valor.partition("|")
+            if len(spec["funciones"]) < 3:
+                spec["funciones"].append((compilar_expresion(cuerpo), (etiqueta.strip() or cuerpo.strip())[:40]))
+        elif clave == "puntos":
+            cuerpo, _, etiqueta = valor.partition("|")
+            pts = [_punto(p) for p in re.findall(r"\(([^()]*)\)", cuerpo)][:200]
+            if pts and len(spec["series"]) < 3:
+                spec["series"].append((pts, etiqueta.strip()[:40] or "Datos"))
+        elif clave == "marcar":
+            m = re.match(r"\(([^()]*)\)\s*(.*)", valor)
+            if m and len(spec["marcas"]) < 8:
+                spec["marcas"].append((*_punto(m.group(1)), m.group(2).strip()[:30]))
+    if not spec["funciones"] and not spec["series"]:
+        raise ValueError("la gráfica no tiene ninguna función ni puntos")
+    if spec["funciones"] and spec["x"] is None:
+        raise ValueError("falta el rango de x (por ejemplo «x: -4, 4»)")
+    return spec
+
+
+def _marcas_ejes(lo: float, hi: float) -> list[float]:
+    bruto = (hi - lo) / 7
+    magnitud = 10 ** math.floor(math.log10(bruto))
+    paso = next((k * magnitud for k in (1, 2, 2.5, 5, 10) if bruto <= k * magnitud), 10 * magnitud)
+    marcas, v = [], math.ceil(lo / paso - 1e-9) * paso
+    while v <= hi + paso * 1e-9 and len(marcas) < 40:
+        marcas.append(round(v, 12))
+        v += paso
+    return marcas
+
+
+def _fmt_num(v: float) -> str:
+    if abs(v) < 1e-9:
+        return "0"
+    return f"{v:.3g}" if abs(v) >= 1e4 or abs(v) < 1e-3 else f"{v:.4g}"
+
+
+def _percentil_lista(valores: list[float], p: float) -> float:
+    v = sorted(valores)
+    k = (len(v) - 1) * p / 100
+    i = int(k)
+    return v[i] + (v[min(i + 1, len(v) - 1)] - v[i]) * (k - i)
+
+
+def svg_grafica(spec: dict) -> str:
+    """Dibuja la gráfica como SVG (fondo blanco, legible en modo claro y oscuro). Solo texto escapado y números."""
+    W, H, ML, MR, MT, MB = 720, 450, 64, 24, 56, 56
+    pw, ph = W - ML - MR, H - MT - MB
+    esc = lambda s: escape(str(s), {'"': "&quot;"})
+
+    series = [(pts, et) for pts, et in spec["series"]]
+    if spec["x"] is not None:
+        x0, x1 = spec["x"]
+    else:
+        xs = [p[0] for pts, _ in series for p in pts] + [m[0] for m in spec["marcas"]]
+        x0, x1 = min(xs), max(xs)
+        x0, x1 = (x0 - 1, x1 + 1) if x0 == x1 else (x0 - (x1 - x0) * 0.05, x1 + (x1 - x0) * 0.05)
+
+    curvas: list[tuple[str, list[tuple[float, float] | None]]] = []
+    for expr, etiqueta in spec["funciones"]:
+        puntos = []
+        for i in range(301):
+            x = x0 + (x1 - x0) * i / 300
+            y = evaluar(expr, x)
+            puntos.append(None if y is None else (x, y))
+        curvas.append((etiqueta, puntos))
+
+    if spec["y"] is not None:
+        y0, y1 = spec["y"]
+    else:
+        ys = [p[1] for _, pts in curvas for p in pts if p] + [p[1] for pts, _ in series for p in pts] \
+             + [m[1] for m in spec["marcas"]]
+        if not ys:
+            raise ValueError("la función no está definida en ese rango")
+        lo, hi = min(ys), max(ys)
+        if len(ys) > 20 and hi - lo > 8 * max(_percentil_lista(ys, 95) - _percentil_lista(ys, 5), 1e-9):
+            lo, hi = _percentil_lista(ys, 2), _percentil_lista(ys, 98)  # hay asíntotas: ignora los extremos
+        if lo == hi:
+            lo, hi = lo - 1, hi + 1
+        margen = (hi - lo) * 0.08
+        y0, y1 = lo - margen, hi + margen
+
+    def px(x: float) -> float:
+        return ML + (x - x0) / (x1 - x0) * pw
+
+    def py(y: float) -> float:
+        return max(-1e4, min(1e4, MT + (1 - (y - y0) / (y1 - y0)) * ph))
+
+    fuente = 'font-family="Arial, Helvetica, sans-serif"'
+    o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
+         f'aria-label="{esc(spec["titulo"] or "Gráfica")}">',
+         f'<title>{esc(spec["titulo"] or "Gráfica")}</title>',
+         f'<defs><clipPath id="area"><rect x="{ML}" y="{MT}" width="{pw}" height="{ph}"/></clipPath></defs>',
+         f'<rect width="{W}" height="{H}" fill="#ffffff"/>']
+    if spec["titulo"]:
+        o.append(f'<text x="{W / 2}" y="30" text-anchor="middle" {fuente} font-size="18" font-weight="bold" '
+                 f'fill="#222222">{esc(spec["titulo"])}</text>')
+    for v in _marcas_ejes(x0, x1):
+        o.append(f'<line x1="{px(v):.1f}" y1="{MT}" x2="{px(v):.1f}" y2="{MT + ph}" stroke="#e3e3e3"/>')
+        o.append(f'<text x="{px(v):.1f}" y="{MT + ph + 18}" text-anchor="middle" {fuente} font-size="12" '
+                 f'fill="#444444">{esc(_fmt_num(v))}</text>')
+    for v in _marcas_ejes(y0, y1):
+        o.append(f'<line x1="{ML}" y1="{py(v):.1f}" x2="{ML + pw}" y2="{py(v):.1f}" stroke="#e3e3e3"/>')
+        o.append(f'<text x="{ML - 8}" y="{py(v) + 4:.1f}" text-anchor="end" {fuente} font-size="12" '
+                 f'fill="#444444">{esc(_fmt_num(v))}</text>')
+    o.append(f'<rect x="{ML}" y="{MT}" width="{pw}" height="{ph}" fill="none" stroke="#999999"/>')
+    if x0 < 0 < x1:
+        o.append(f'<line x1="{px(0):.1f}" y1="{MT}" x2="{px(0):.1f}" y2="{MT + ph}" stroke="#333333" stroke-width="1.6"/>')
+    if y0 < 0 < y1:
+        o.append(f'<line x1="{ML}" y1="{py(0):.1f}" x2="{ML + pw}" y2="{py(0):.1f}" stroke="#333333" stroke-width="1.6"/>')
+    o.append(f'<text x="{ML + pw / 2}" y="{H - 12}" text-anchor="middle" {fuente} font-size="14" '
+             f'fill="#222222">{esc(spec["ejex"])}</text>')
+    o.append(f'<text x="18" y="{MT + ph / 2}" text-anchor="middle" {fuente} font-size="14" fill="#222222" '
+             f'transform="rotate(-90 18 {MT + ph / 2})">{esc(spec["ejey"])}</text>')
+
+    leyenda, o_clip, o_puntos = [], [], []
+    for i, (etiqueta, puntos) in enumerate(curvas):
+        color, trazo, abierto, previo = COLORES_GRAFICA[i % 4], [], False, None
+        for p in puntos:
+            if p is None:
+                abierto, previo = False, None
+                continue
+            alto = y1 - y0
+            # Asíntota: salto enorme, o cambio de signo con los dos lados lejos del eje (un cruce normal
+            # por el cero, por empinado que sea, tiene valores pequeños a ambos lados)
+            if previo is not None and (abs(p[1] - previo) > 2.5 * alto
+                                       or (p[1] * previo < 0 and min(abs(p[1]), abs(previo)) > 0.2 * alto)):
+                abierto = False
+            trazo.append(("L" if abierto else "M") + f"{px(p[0]):.1f},{py(p[1]):.1f}")
+            abierto, previo = True, p[1]
+        o_clip.append(f'<path d="{" ".join(trazo)}" fill="none" stroke="{color}" stroke-width="2.4" '
+                      'stroke-linejoin="round"/>')
+        leyenda.append((color, etiqueta))
+    for j, (pts, etiqueta) in enumerate(series):
+        color = COLORES_GRAFICA[(len(curvas) + j) % 4]
+        ordenados = sorted(pts)
+        o_clip.append('<polyline fill="none" stroke="%s" stroke-width="2" points="%s"/>' % (
+            color, " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in ordenados)))
+        o_puntos.extend(f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" r="3.5" fill="{color}"/>'
+                        for x, y in ordenados if x0 <= x <= x1 and y0 <= y <= y1)  # fuera del recorte: no se cortan a la mitad
+        leyenda.append((color, etiqueta))
+    o.append('<g clip-path="url(#area)">' + "".join(o_clip) + "</g>")
+    o.extend(o_puntos)
+    for x, y, etiqueta in spec["marcas"]:
+        if x0 <= x <= x1 and y0 <= y <= y1:
+            o.append(f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" r="5" fill="#d62728" stroke="#ffffff" stroke-width="1.5"/>')
+            if etiqueta:
+                o.append(f'<text x="{px(x) + 8:.1f}" y="{py(y) - 8:.1f}" {fuente} font-size="12" fill="#222222" '
+                         f'stroke="#ffffff" stroke-width="3" paint-order="stroke">{esc(etiqueta)}</text>')
+    for i, (color, etiqueta) in enumerate(leyenda):
+        yy = MT + 18 + i * 20
+        o.append(f'<line x1="{ML + 12}" y1="{yy - 4}" x2="{ML + 36}" y2="{yy - 4}" stroke="{color}" stroke-width="3"/>')
+        o.append(f'<text x="{ML + 42}" y="{yy}" {fuente} font-size="12" fill="#222222" stroke="#ffffff" '
+                 f'stroke-width="3" paint-order="stroke">{esc(etiqueta)}</text>')
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+# --- Texto con formato -----------------------------------------------------------------------
+def _trozos_texto(texto: str, negrita: bool = False, codigo: bool = False, cursiva: bool = False) -> list[dict]:
+    anot = {k: True for k, activo in (("bold", negrita), ("code", codigo), ("italic", cursiva)) if activo}
+    extra = {"annotations": anot} if anot else {}
     return [
         {"type": "text", "text": {"content": texto[i : i + RICH_MAX]}, **extra}
         for i in range(0, len(texto), RICH_MAX)
@@ -1065,20 +1656,25 @@ def _trozos_texto(texto: str, negrita: bool = False) -> list[dict]:
 
 
 def _rich_text(texto: str) -> list[dict]:
-    """Convierte **negrita**, $fórmulas$ y $$fórmulas$$ en línea a rich_text."""
+    """Convierte **negrita**, *cursiva*, `código` y fórmulas $...$ en línea a rich_text de Notion."""
     rt: list[dict] = []
     for parte in _RE_INLINE.split(texto):
         if not parte:
             continue
-        expr = None
-        if parte.startswith("$$") and parte.endswith("$$") and len(parte) > 4:
-            expr = parte[2:-2].strip()
-        elif parte.startswith("$") and parte.endswith("$") and len(parte) > 2:
-            expr = parte[1:-1].strip()
-        if expr and len(expr) <= EQ_MAX:
-            rt.append({"type": "equation", "equation": {"expression": expr}})
+        if parte.startswith("$") and parte.endswith("$") and len(parte) > 2:
+            doble = parte.startswith("$$") and len(parte) > 4
+            fuente = parte[2:-2].strip() if doble else parte[1:-1].strip()
+            expr = latex_seguro(fuente)
+            if expr:
+                rt.append({"type": "equation", "equation": {"expression": expr}})
+            else:  # LaTeX dudoso: se enseña tal cual, como código, en vez de arriesgar toda la página
+                rt.extend(_trozos_texto(fuente, codigo=True))
         elif parte.startswith("**") and parte.endswith("**") and len(parte) > 4:
             rt.extend(_trozos_texto(parte[2:-2], negrita=True))
+        elif parte.startswith("`") and parte.endswith("`") and len(parte) > 2:
+            rt.extend(_trozos_texto(parte[1:-1], codigo=True))
+        elif parte.startswith("*") and parte.endswith("*") and len(parte) > 2:
+            rt.extend(_trozos_texto(parte[1:-1], cursiva=True))
         else:
             rt.extend(_trozos_texto(parte))
     return rt[:100]  # máximo de Notion por bloque
@@ -1089,33 +1685,91 @@ def _bloque(tipo: str, texto: str) -> dict | None:
     return {"object": "block", "type": tipo, tipo: {"rich_text": rt}} if rt else None
 
 
-def markdown_a_bloques(markdown: str) -> list[dict]:
-    lineas = _limpiar_texto(markdown).split("\n")
+def _bloque_codigo(codigo: str, lenguaje: str) -> dict | None:
+    return ({"object": "block", "type": "code",
+             "code": {"rich_text": _trozos_texto(codigo), "language": lenguaje}} if codigo.strip() else None)
+
+
+def _dividir_celdas(linea: str) -> list[str]:
+    """Separa una fila de tabla por '|' sin romper las fórmulas con $|x|$."""
+    celdas, actual, en_formula = [], "", False
+    for c in linea.strip().strip("|"):
+        if c == "$":
+            en_formula = not en_formula
+        if c == "|" and not en_formula:
+            celdas.append(actual.strip())
+            actual = ""
+        else:
+            actual += c
+    return celdas + [actual.strip()]
+
+
+_RE_SEPARADOR_TABLA = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _normalizar_delimitadores_latex(lineas: list[str]) -> list[str]:
+    """Convierte los delimitadores LaTeX alternativos (corchetes y paréntesis con barra) a $$ y $, fuera del código."""
+    salida, en_codigo = [], False
+    for linea in lineas:
+        if linea.strip().startswith("```"):
+            en_codigo = not en_codigo
+        elif not en_codigo:
+            linea = linea.replace("\\[", "$$").replace("\\]", "$$").replace("\\(", "$").replace("\\)", "$")
+        salida.append(linea)
+    return salida
+
+
+def _parsear_bloques(lineas: list[str], nivel: int = 0) -> list[dict | None]:
+    """Líneas de Markdown -> bloques. `nivel` = contenedores (aviso, desplegable) que ya envuelven estas
+    líneas: Notion admite como mucho dos niveles de anidación en una petición."""
     bloques: list[dict | None] = []
-    i = 0
-    while i < len(lineas):
-        linea = lineas[i].strip()
+    pila: list[tuple[int, dict]] = []  # elementos de lista abiertos (sangría, bloque)
+    max_hijos = max(0, 2 - nivel)
+    i, n = 0, len(lineas)
+    while i < n:
+        bruta = lineas[i]
+        linea = bruta.strip()
         i += 1
         if not linea:
             continue
 
-        # Bloque de código ```lang ... ```
+        # Elementos de lista (con sublistas por sangría)
+        m_vineta = re.match(r"^[-*]\s+(.*)", linea)
+        m_numero = re.match(r"^\d+[.)]\s+(.*)", linea)
+        if m_vineta or m_numero:
+            tipo = "bulleted_list_item" if m_vineta else "numbered_list_item"
+            item = _bloque(tipo, (m_vineta or m_numero).group(1))
+            if item is None:
+                continue
+            sangria = len(bruta.replace("\t", "    ")) - len(bruta.replace("\t", "    ").lstrip())
+            while pila and pila[-1][0] >= sangria:
+                pila.pop()
+            del pila[max_hijos:]
+            if pila:
+                pila[-1][1][pila[-1][1]["type"]].setdefault("children", []).append(item)
+            else:
+                bloques.append(item)
+            pila.append((sangria, item))
+            continue
+        pila.clear()
+
+        # Código ```lenguaje ... ``` (mermaid y grafica reciben tratamiento especial)
         if linea.startswith("```"):
-            lang = linea[3:].strip().lower()
+            lenguaje = linea[3:].strip().lower().split(" ")[0]
+            lenguaje = _ALIAS_LENGUAJE.get(lenguaje, lenguaje)
             codigo = []
-            while i < len(lineas) and not lineas[i].strip().startswith("```"):
+            while i < n and not lineas[i].strip().startswith("```"):
                 codigo.append(lineas[i])
                 i += 1
             i += 1
-            texto = "\n".join(codigo)[:RICH_MAX]
-            if texto:
-                bloques.append({
-                    "object": "block", "type": "code",
-                    "code": {
-                        "rich_text": [{"type": "text", "text": {"content": texto}}],
-                        "language": lang if lang in _LENGUAJES_CODIGO else "plain text",
-                    },
-                })
+            texto = "\n".join(codigo)
+            if lenguaje == "grafica":
+                bloques.append({"_grafica": texto})
+            elif lenguaje == "mermaid":
+                limpio = mermaid_seguro(texto)
+                bloques.append(_bloque_codigo(limpio or texto, "mermaid" if limpio else "plain text"))
+            else:
+                bloques.append(_bloque_codigo(texto, lenguaje if lenguaje in _LENGUAJES_CODIGO else "plain text"))
             continue
 
         # Ecuación en bloque: $$x$$ en una línea, o $$ / fórmula / $$ en varias
@@ -1125,7 +1779,7 @@ def markdown_a_bloques(markdown: str) -> list[dict]:
                 expr = linea[2:-2].strip()
             elif "$$" not in linea[2:]:
                 partes = [linea[2:]]
-                while i < len(lineas):
+                while i < n:
                     siguiente = lineas[i].strip()
                     i += 1
                     if siguiente.endswith("$$"):
@@ -1134,26 +1788,196 @@ def markdown_a_bloques(markdown: str) -> list[dict]:
                     partes.append(siguiente)
                 expr = " ".join(p for p in partes if p).strip()
             if expr is not None:
-                if expr and len(expr) <= EQ_MAX:
-                    bloques.append({"object": "block", "type": "equation",
-                                    "equation": {"expression": expr}})
+                limpia = latex_seguro(expr) if expr else None
+                if limpia:
+                    bloques.append({"object": "block", "type": "equation", "equation": {"expression": limpia}})
                 elif expr:
-                    bloques.append(_bloque("paragraph", expr))
+                    bloques.append(_bloque_codigo(expr, "latex"))
                 continue
+
+        # Desplegable <details><summary>…</summary> … </details>
+        if linea.lower().startswith("<details"):
+            cuerpo, abiertas = [], 1
+            resto = re.sub(r"^<details[^>]*>", "", linea, flags=re.IGNORECASE).strip()
+            if resto:
+                cuerpo.append(resto)
+            while i < n and abiertas:
+                siguiente = lineas[i]
+                i += 1
+                bajo = siguiente.strip().lower()
+                abiertas += bajo.startswith("<details")
+                if "</details>" in bajo:
+                    abiertas -= 1
+                    if not abiertas:
+                        antes = re.split(r"</details>", siguiente, flags=re.IGNORECASE)[0]
+                        if antes.strip():
+                            cuerpo.append(antes)
+                        break
+                cuerpo.append(siguiente)
+            texto = "\n".join(cuerpo)
+            resumen = re.search(r"<summary>(.*?)</summary>", texto, flags=re.IGNORECASE | re.DOTALL)
+            titulo = resumen.group(1).strip() if resumen else "Ver más"
+            if resumen:
+                texto = texto[: resumen.start()] + texto[resumen.end():]
+            hijos = [b for b in _parsear_bloques(texto.split("\n"), nivel + 1) if b][:100]
+            if nivel >= 2:  # sin sitio para más anidación: se aplana
+                bloques.append(_bloque("paragraph", f"**{titulo}**"))
+                bloques.extend(hijos)
+            else:
+                rt = _rich_text(titulo) or _trozos_texto("Ver más")
+                bloques.append({"object": "block", "type": "toggle", "toggle": {"rich_text": rt, "children": hijos}})
+            continue
+
+        # Citas y avisos  > [!IDEA] Título
+        if linea.startswith(">"):
+            cita = [linea.lstrip(">").strip()]
+            while i < n and lineas[i].strip().startswith(">"):
+                cita.append(lineas[i].strip().lstrip(">").strip())
+                i += 1
+            etiqueta = _RE_CALLOUT.match(cita[0])
+            clave = _norm(etiqueta.group(1)).upper() if etiqueta else ""
+            if clave in _CALLOUTS:
+                emoji, color, titulo_defecto = _CALLOUTS[clave]
+                titulo = etiqueta.group(2).strip() or titulo_defecto
+                hijos = [b for b in _parsear_bloques(cita[1:], nivel + 1) if b][:100]
+                bloques.append({"object": "block", "type": "callout", "callout": {
+                    "rich_text": _trozos_texto(titulo[:200], negrita=True),
+                    "icon": {"type": "emoji", "emoji": emoji}, "color": color,
+                    **({"children": hijos} if hijos else {})}})
+            else:
+                bloques.append(_bloque("quote", "\n".join(c for c in cita if c)))
+            continue
+
+        # Tablas Markdown
+        if linea.startswith("|") and i < n and _RE_SEPARADOR_TABLA.match(lineas[i].strip()):
+            filas = [_dividir_celdas(linea)]
+            i += 1
+            while i < n and lineas[i].strip().startswith("|") and len(filas) < 40:
+                filas.append(_dividir_celdas(lineas[i]))
+                i += 1
+            ancho = min(8, max(len(f) for f in filas))
+            bloques.append({"object": "block", "type": "table", "table": {
+                "table_width": ancho, "has_column_header": True, "has_row_header": False,
+                "children": [{"object": "block", "type": "table_row", "table_row": {
+                    "cells": [_rich_text(c) for c in (f + [""] * ancho)[:ancho]]}} for f in filas]}})
+            continue
 
         if re.fullmatch(r"[-*_]{3,}", linea):
             bloques.append({"object": "block", "type": "divider", "divider": {}})
         elif m := re.match(r"^(#{1,6})\s+(.*)", linea):
             bloques.append(_bloque(f"heading_{min(len(m.group(1)), 3)}", m.group(2)))
-        elif m := re.match(r"^[-*]\s+(.*)", linea):
-            bloques.append(_bloque("bulleted_list_item", m.group(1)))
-        elif m := re.match(r"^\d+[.)]\s+(.*)", linea):
-            bloques.append(_bloque("numbered_list_item", m.group(1)))
-        elif linea.startswith(">"):
-            bloques.append(_bloque("quote", linea.lstrip("> ")))
+        elif re.match(r"^!\[[^\]]*\]\([^)]*\)$", linea):
+            continue  # no se enlazan imágenes externas
         else:
             bloques.append(_bloque("paragraph", linea))
-    return [b for b in bloques if b]
+    return bloques
+
+
+def markdown_a_bloques(markdown: str) -> list[dict]:
+    texto = _limpiar_texto(markdown)
+    cerco = re.match(r"^```(?:markdown|md)\s*\n(.*)\n```$", texto, flags=re.DOTALL)  # la IA a veces lo envuelve todo
+    if cerco:
+        texto = cerco.group(1)
+    return [b for b in _parsear_bloques(_normalizar_delimitadores_latex(texto.split("\n"))) if b]
+
+
+# --- Degradación: si Notion rechaza algo, la masterclass se publica igualmente ----------------------
+def degradar_bloques(bloques):
+    """Copia sin los elementos delicados: fórmulas -> código, diagramas -> texto, imágenes -> aviso."""
+    if isinstance(bloques, list):
+        return [degradar_bloques(b) for b in bloques]
+    if not isinstance(bloques, dict):
+        return bloques
+    if bloques.get("type") == "equation" and "object" not in bloques:  # fórmula en línea
+        return {"type": "text", "text": {"content": bloques["equation"]["expression"]}, "annotations": {"code": True}}
+    if bloques.get("object") == "block":
+        tipo = bloques.get("type")
+        if tipo == "equation":
+            return _bloque_codigo(bloques["equation"]["expression"], "latex")
+        if tipo == "image":
+            return _bloque("paragraph", "(figura no disponible)")
+        if tipo == "code" and bloques["code"].get("language") == "mermaid":
+            return {**bloques, "code": {**bloques["code"], "language": "plain text"}}
+    return {k: degradar_bloques(v) for k, v in bloques.items()}
+
+
+def _recorrer(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _recorrer(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _recorrer(v)
+
+
+def contar_visuales(bloques: list[dict]) -> dict[str, int]:
+    c = {"fórmulas": 0, "diagramas": 0, "gráficas": 0, "tablas": 0, "avisos": 0, "desplegables": 0}
+    for d in _recorrer(bloques):
+        tipo = d.get("type")
+        if tipo == "equation":
+            c["fórmulas"] += 1
+        elif d.get("object") == "block":
+            if tipo == "code" and d["code"].get("language") == "mermaid":
+                c["diagramas"] += 1
+            elif tipo == "image":
+                c["gráficas"] += 1
+            elif tipo in {"table", "callout", "toggle"}:
+                c[{"table": "tablas", "callout": "avisos", "toggle": "desplegables"}[tipo]] += 1
+    return {k: v for k, v in c.items() if v}
+
+
+def informe_visual(bloques: list[dict], fallidas: int = 0, degradada: bool = False) -> str:
+    c = contar_visuales(bloques)
+    lineas = []
+    if c:
+        lineas.append("📐 Incluye: " + " · ".join(f"{v} {k}" for k, v in c.items()) + ".")
+    if fallidas:
+        lineas.append(f"⚠️ {fallidas} gráfica{'s' if fallidas != 1 else ''} no se pudo dibujar y quedó como texto.")
+    if degradada:
+        lineas.append("⚠️ Notion rechazó algún elemento visual, así que lo he guardado como texto simple.")
+    return "\n".join(lineas)
+
+
+async def resolver_graficas(notion: "Notion", bloques: list[dict]) -> tuple[list[dict], int]:
+    """Cambia cada marcador de gráfica por una imagen SVG dibujada aquí y subida a Notion.
+    Devuelve (bloques, nº de gráficas que han fallado); las fallidas quedan como una línea de texto."""
+    estado = {"hechas": 0, "fallidas": 0}
+
+    async def una(texto: str) -> dict | None:
+        titulo = ""
+        try:
+            if estado["hechas"] + estado["fallidas"] >= MAX_GRAFICAS:
+                raise ValueError("demasiadas gráficas en una masterclass")
+            spec = parsear_grafica(texto)
+            titulo = spec["titulo"]
+            svg = svg_grafica(spec).encode("utf-8")
+            archivo = await notion.subir_archivo(svg, "grafica.svg", "image/svg+xml")
+        except (ValueError, NotionError) as e:
+            estado["fallidas"] += 1
+            log.warning("Gráfica no dibujada: %s", e)
+            return _bloque("paragraph", f"📈 {titulo or 'Gráfica'}: no he podido dibujarla.")
+        estado["hechas"] += 1
+        imagen = {"type": "file_upload", "file_upload": {"id": archivo}}
+        if titulo:
+            imagen["caption"] = _trozos_texto(titulo)
+        return {"object": "block", "type": "image", "image": imagen}
+
+    async def recorrer(lista: list[dict]) -> list[dict]:
+        salida = []
+        for b in lista:
+            if "_grafica" in b:
+                nuevo = await una(b["_grafica"])
+                if nuevo:
+                    salida.append(nuevo)
+                continue
+            cuerpo = b.get(b.get("type", ""))
+            if isinstance(cuerpo, dict) and cuerpo.get("children"):
+                cuerpo["children"] = await recorrer(cuerpo["children"])
+            salida.append(b)
+        return salida
+
+    return await recorrer(bloques), estado["fallidas"]
 
 
 _cache_esquemas: dict[str, tuple[float, tuple[str, str | None]]] = {}
@@ -1178,20 +2002,32 @@ async def propiedades_db(notion: Notion, db_id: str) -> tuple[str, str | None]:
 
 async def crear_pagina_notion(notion: Notion, db_id: str, titulo: str, fecha: str | None = None,
                               bloques: list[dict] | None = None) -> dict:
-    """Crea una página; los primeros 100 bloques van en la misma petición."""
+    """Crea una página; los primeros 100 bloques van en la misma petición. Si Notion rechaza algún elemento
+    delicado (fórmula, diagrama, imagen), reintenta con una versión simple: la página nunca se pierde."""
     prop_titulo, prop_fecha = await propiedades_db(notion, db_id)
     props: dict = {prop_titulo: {"title": [{"text": {"content": titulo[:RICH_MAX]}}]}}
     if fecha:
         if not prop_fecha:
             raise NotionError("Tu base de datos no tiene ninguna propiedad de tipo fecha.")
         props[prop_fecha] = {"date": {"start": fecha}}
-    cuerpo: dict = {"parent": {"database_id": db_id}, "properties": props}
     bloques = bloques or []
-    if bloques:
-        cuerpo["children"] = bloques[:100]
-    pagina = await notion.request("POST", "pages", cuerpo)
+    degradada = False
+
+    async def enviar(metodo: str, endpoint: str, base: dict, hijos: list[dict]) -> dict:
+        nonlocal degradada
+        try:
+            return await notion.request(metodo, endpoint, {**base, **({"children": hijos} if hijos else {})})
+        except NotionError as e:
+            if "HTTP 400" not in str(e) or not hijos:
+                raise
+            log.warning("Notion rechazó parte del contenido; reintento con una versión simple: %s", str(e)[:200])
+            degradada = True
+            return await notion.request(metodo, endpoint, {**base, "children": degradar_bloques(hijos)})
+
+    pagina = await enviar("POST", "pages", {"parent": {"database_id": db_id}, "properties": props}, bloques[:100])
     for i in range(100, len(bloques), 100):
-        await notion.request("PATCH", f"blocks/{pagina['id']}/children", {"children": bloques[i : i + 100]})
+        await enviar("PATCH", f"blocks/{pagina['id']}/children", {}, bloques[i : i + 100])
+    pagina["_zapy_degradada"] = degradada
     return pagina
 
 
@@ -2431,7 +3267,7 @@ async def mostrar_comandos(ctx: commands.Context):
     )
     embed.add_field(name="📅 Notion", value="`!eventos` - Lista los próximos exámenes/tareas.", inline=False)
     embed.add_field(name="➕ Añadir", value="`!añadir Nombre | AAAA-MM-DD` - Guarda un evento.", inline=False)
-    embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Genera apuntes en Notion.", inline=False)
+    embed.add_field(name="🚀 Masterclass", value="`!apuntes Asignatura | Tema` - Masterclass en Notion con fórmulas, diagramas y gráficas.", inline=False)
     embed.add_field(name="🧹 Limpiar", value="`!clear [n]` - Borra mensajes (requiere permiso).", inline=False)
     embed.add_field(name="💬 Planificar", value="Menciona a Zapy o escríbele por DM.", inline=False)
     await ctx.send(embed=embed)
@@ -2617,14 +3453,15 @@ async def generar_apuntes(ctx: commands.Context, *, args: str):
             prompt = f"Elabora la Masterclass sobre '{tema}' de '{asignatura}'."
             if perfil.curso:
                 prompt += f" Curso del estudiante: {perfil.curso}."
+            prompt += f"\n\nPISTAS PARA ESTA MATERIA: {pistas_asignatura(asignatura)}"
             if algoritmo:
                 prompt += f"\n\n--- METODOLOGÍA Y ALGORITMO ---\n{algoritmo}"
             markdown = await generar_texto(
                 cliente_gemini(perfil), prompt, SYSTEM_PROMPT_MASTERCLASS, MAX_TOKENS_MASTERCLASS
             )
-            pagina = await crear_pagina_notion(
-                bot.notion_de(perfil), db_id, f"Masterclass: {tema}", bloques=markdown_a_bloques(markdown)
-            )
+            notion = bot.notion_de(perfil)
+            bloques, graficas_fallidas = await resolver_graficas(notion, markdown_a_bloques(markdown))
+            pagina = await crear_pagina_notion(notion, db_id, f"Masterclass: {tema}", bloques=bloques)
         except ClaveGeminiError:
             await ctx.send(MSG_CLAVE_GEMINI)
             return
@@ -2641,8 +3478,10 @@ async def generar_apuntes(ctx: commands.Context, *, args: str):
             return
 
     enlace = pagina.get("url", "")
+    informe = informe_visual(bloques, graficas_fallidas, pagina.get("_zapy_degradada", False))
     await ctx.send(
-        f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.\n{enlace}",
+        f"🚀 **Masterclass generada:** **{tema}** ({asignatura.capitalize()}) publicada en Notion.\n{enlace}"
+        + (f"\n{informe}" if informe else ""),
         allowed_mentions=SIN_MENCIONES,
     )
 
